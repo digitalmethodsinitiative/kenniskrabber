@@ -186,6 +186,7 @@ class GoogleAIScraper:
 				if not self.is_running:
 					self.log("Scraping stopped by user.")
 					break
+
 				page_id = query_and_id[0]
 				query = query_and_id[1]
 				self.log(f"Getting data for url {count}/{n_urls}: {query}")
@@ -203,14 +204,15 @@ class GoogleAIScraper:
 
 						# Replace this with your actual parse_ai_overview call
 						self.log(f"Parsing AI Overview for: {query}")
-						result = {"mode": mode, "id": page_id, "query": query, "text": "Extracted text"}
+
+						result = self.parse_ai_overview(page_id, query)
 
 						if result:
 							with open(self.results_file, "a", encoding="utf-8") as out_file:
 								out_file.write(json.dumps(result) + "\n")
 
-						# self.save_html(query, page_id, mode)
-						# self.save_screenshot(query, page_id, mode)
+						self.save_html(query, page_id, mode)
+						self.save_screenshot(query, page_id, mode)
 						self.finished_ai_overview_queries.add(page_id)
 						self.print_elapsed_time(start, n_urls, count)
 					else:
@@ -226,15 +228,14 @@ class GoogleAIScraper:
 
 						# Replace this with your actual parse_ai_mode call
 						self.log(f"Parsing AI Mode for: {query}")
-						result = {"mode": mode, "id": page_id, "query": query, "text": "Extracted text"}
+						result = self.parse_ai_mode(page_id, query)
 
 						if result:
 							with open(self.results_file, "a", encoding="utf-8") as out_file:
 								out_file.write(json.dumps(result) + "\n")
 
-						# self.save_html(query, page_id, mode)
-						time.sleep(1)
-						# self.save_screenshot(query, page_id, mode)
+						self.save_html(query, page_id, mode)
+						self.save_screenshot(query, page_id, mode)
 						self.finished_ai_mode_queries.add(page_id)
 						self.print_elapsed_time(start, n_urls, count)
 					else:
@@ -263,6 +264,251 @@ class GoogleAIScraper:
 			self.log(traceback.format_exc())
 		finally:
 			self.stop()
+
+
+	def parse_ai_overview(self, page_id, query) -> dict:
+		time.sleep(1)
+		while True:
+			ai_overview = self.driver.find_elements(by=By.CSS_SELECTOR, value="#eKIzJc")
+			if ai_overview and ai_overview[0].is_displayed():
+				ai_overview = ai_overview[0]
+				ai_overview_inner = ai_overview.text
+
+				if any(generating_string in ai_overview_inner for generating_string in self.generating_strings):
+					while True:
+						print("AI overview answer may not be done generating, waiting 2 secs...")
+						time.sleep(2)
+						ai_overview = self.driver.find_elements(by=By.CSS_SELECTOR, value="#eKIzJc")
+						if ai_overview:
+							ai_overview = ai_overview[0]
+							break
+
+				ai_overview_data = {
+					"mode": "ai_overview",
+					"id": page_id,
+					"from_url": self.driver.current_url,
+					"query": query,
+					"timestamp_scraped": datetime.now().isoformat(),
+					"timestamp_scraped_unix": int(datetime.timestamp(datetime.now())),
+					"not_available": False,
+					"text": "",
+					"sources": []
+				}
+
+				show_more_button = self.driver.find_elements(by=By.CSS_SELECTOR, value="div.zNsLfb.Jzkafd")
+				failed_elements = ai_overview.find_elements(by=By.CSS_SELECTOR, value=".YWpX0d[style='']")
+				throttled = False
+				ai_overview_inner_text = ai_overview.find_elements(by=By.CSS_SELECTOR, value=".YWpX0d")
+				if ai_overview_inner_text:
+					ai_overview_inner_text = ai_overview_inner_text[0].get_attribute("innerHTML")
+				if ai_overview_inner_text and any(
+						throttled_string in ai_overview_inner_text for throttled_string in self.throttled_strings):
+					throttled = True
+
+				if not show_more_button and (failed_elements or throttled):
+					if failed_elements:
+						ai_overview_data["text"] = ai_overview.text
+					else:
+						ai_overview_data["text"] = ai_overview.get_attribute("innerHTML")
+					ai_overview_data["not_available"] = True
+
+					if throttled:
+						print("Throttled, trying again in 10 minutes")
+						time.sleep(600)
+						self.driver.refresh()
+						self.check_for_captcha()
+						continue
+				else:
+					if show_more_button:
+						try:
+							show_more_button[0].click()
+						except (StaleElementReferenceException, ElementNotInteractableException):
+							print("Could not find the 'Show more' button anymore, continuing")
+
+					show_more_urls_button = ai_overview.find_elements(by=By.CSS_SELECTOR,
+																	  value="li > div > div.niO4u.VDgVie.SlP8xc")
+					if show_more_urls_button:
+						for show_more_button in show_more_urls_button:
+							self.wait.until(lambda _: show_more_button.is_displayed())
+							if show_more_button.is_displayed():
+								try:
+									show_more_button.click()
+								except ElementNotInteractableException:
+									print("ERROR: Could not expand URL box, continuing anyway")
+
+					ai_overview_html = None
+					retry_ai_overview_count = 0
+					while not ai_overview_html:
+						ai_overview_html = ai_overview.find_elements(by=By.CSS_SELECTOR,
+																	 value="div[jsname][data-rl] > div:not([id])")
+
+						retry_ai_overview_count += 1
+						if retry_ai_overview_count > 5:
+							print("AI Overview hidden or not found, skipping...")
+							return {}
+
+					ai_overview_html = ai_overview_html[0]
+					ai_overview_html = ai_overview_html.get_attribute("outerHTML")
+
+					ai_overview_contents_md = md(ai_overview_html, strip=["a", "img"])
+					ai_overview_data["text"] = ai_overview_contents_md
+
+					urls = []
+					url_divs = self.driver.find_elements(by=By.CSS_SELECTOR, value="ul.zVKf0d.w2xCsc > li.LLtSOc")
+					if not url_divs:
+						url_divs = self.driver.find_elements(by=By.CSS_SELECTOR,
+															 value="ul.zVKf0d.Cgh8Qc > li.LLtSOc")
+					url_divs += self.driver.find_elements(by=By.CSS_SELECTOR,
+														  value="div[data-attrid='SGEAttributionFeedback']")
+					for url_div in url_divs:
+						if url_div.is_displayed():
+							url_div_a = url_div.find_element(by=By.CSS_SELECTOR, value="a")
+							url_div_url = url_div_a.get_attribute("href")
+							url_div_description = url_div.find_elements(by=By.CSS_SELECTOR, value=".gxZfx")
+							url_div_description += url_div.find_elements(by=By.CSS_SELECTOR, value=".dMCttd")
+							description = url_div_description[0].text if url_div_description else ""
+
+							url = {
+								"title": url_div_a.get_attribute("aria-label"),
+								"description": description,
+								"domain": urlparse(url_div_url).netloc,
+								"url": url_div_url,
+							}
+							urls.append(url)
+
+					ai_overview_data["sources"] = urls
+
+				return ai_overview_data
+			else:
+				return {}
+
+	def parse_ai_mode(self, page_id, query) -> dict:
+		time.sleep(4)
+		while True:
+			ai_mode = self.driver.find_elements(by=By.CSS_SELECTOR, value="section")
+			if ai_mode and ai_mode[0].is_displayed():
+				ai_mode = ai_mode[0]
+				ai_mode_inner = ai_mode.text
+
+				if (any(generating_string in ai_mode_inner for generating_string in self.generating_strings)
+						or not ai_mode.find_elements(by=By.CSS_SELECTOR,
+													 value="section #aim-chrome-initial-inline-async-container > div[data-processed=true]")):
+					while True:
+						print("AI overview may not be done generating, waiting 2 secs...")
+						time.sleep(2)
+						generated = True if ai_mode.find_elements(by=By.CSS_SELECTOR,
+																  value="section #aim-chrome-initial-inline-async-container > div[data-processed=true]") else False
+						if generated:
+							break
+				time.sleep(1)
+
+				ai_mode_data = {
+					"mode": "ai_mode",
+					"id": page_id,
+					"from_url": self.driver.current_url,
+					"query": query,
+					"timestamp_scraped": datetime.now().isoformat(),
+					"timestamp_scraped_unix": int(datetime.timestamp(datetime.now())),
+					"not_available": True,
+					"text": "",
+					"sources": []
+				}
+
+				throttled = False
+				if any(throttled_string in ai_mode_inner for throttled_string in self.throttled_strings):
+					throttled = True
+				if throttled:
+					print("Throttled, trying again in 10 minutes. Keep the browser window open.")
+					time.sleep(600)
+					self.driver.refresh()
+					self.check_for_captcha()
+					continue
+
+				show_more_urls_button = ai_mode.find_elements(by=By.CSS_SELECTOR,
+															  value="div[data-processed=true] > div.BjvG9b")
+				if show_more_urls_button:
+					for show_more_button in show_more_urls_button:
+						try:
+							self.wait.until(lambda _: show_more_button.is_displayed())
+							if show_more_button.is_displayed():
+								try:
+									show_more_button.click()
+								except ElementNotInteractableException:
+									print("ERROR: Could not expand URL box, continuing anyway")
+						except TimeoutException:
+							print("ERROR: Could not expand URL box, continuing anyway")
+
+				main_col_id = "#aim-chrome-initial-inline-async-container div[data-container-id=main-col]"
+				ai_mode_html = ai_mode.find_elements(by=By.CSS_SELECTOR, value=main_col_id)
+				if not ai_mode_html:
+					time.sleep(6)
+					ai_mode.find_elements(by=By.CSS_SELECTOR, value=main_col_id)
+				ai_mode_html = ai_mode_html[0]
+				ai_mode_html = ai_mode_html.get_attribute("outerHTML")
+
+				ai_mode_contents_md = md(ai_mode_html, strip=["a", "img"])
+				ai_mode_data["text"] = ai_mode_contents_md.split("AI-reacties kunnen")[0]
+
+				urls = []
+				url_divs = self.driver.find_elements(by=By.CSS_SELECTOR, value="li.CyMdWb > div > div[data-ved]")
+
+				for url_div in url_divs:
+					url_div_a = url_div.find_element(by=By.CSS_SELECTOR, value="a")
+					url_div_url = url_div_a.get_attribute("href")
+					url_div_description = url_div.find_elements(by=By.CSS_SELECTOR, value=".vhJ6Pe")
+					description = url_div_description[0].text if url_div_description else ""
+
+					url = {
+						"title": url_div_a.get_attribute("aria-label"),
+						"description": description,
+						"domain": urlparse(url_div_url).netloc,
+						"url": url_div_url,
+					}
+					urls.append(url)
+
+				ai_mode_data["sources"] = urls
+				ai_mode_data["not_available"] = False
+				break
+
+		return ai_mode_data if ai_mode_data and ai_mode_data.get("text") else {}
+
+	def save_html(self, query, page_id, mode):
+		html_dir = self.output_dir + "/html"
+		if not os.path.isdir(html_dir):
+			os.mkdir(html_dir)
+
+		filename_query = re.sub(r'[\\/*?:"<>|]', "", query)
+		filename_base = f"{page_id}_{mode}_{filename_query}"
+		filename = filename_base + ".html"
+		html_location = f"{html_dir}/{filename}"
+
+		with open(html_location, "w", encoding="utf-8") as out_html:
+			out_html.write(self.driver.page_source)
+
+	def save_screenshot(self, query, page_id, mode):
+		screenshots_dir = self.output_dir + "/screenshots"
+		if not os.path.isdir(screenshots_dir):
+			os.mkdir(screenshots_dir)
+
+		filename_query = query
+		filename_query = re.sub(r'[\\/*?:"<>|]', "", filename_query)
+		filename_base = f"{page_id}_{mode}_{filename_query}"
+		filename = filename_base + ".png"
+		screenshot_location = f"{screenshots_dir}/{filename}"
+
+		if mode == "ai_overviews":
+			window_height = self.driver.execute_script("return document.documentElement.scrollHeight")
+			self.driver.set_window_size(1920, window_height)
+		else:
+			chat_box_height = self.driver.execute_script(f"return document.querySelector('div.WzWwpc').offsetHeight;")
+			height_maximalized = 300 + int(chat_box_height)
+			window_height = 1080 if height_maximalized < 1080 else height_maximalized
+			self.driver.set_window_size(1920, window_height)
+
+		self.driver.execute_script("window.scrollTo(0, 0);")
+		self.driver.save_screenshot(screenshot_location)
+		self.driver.set_window_size(1920, 1080)
+
 
 	def stop(self):
 		self.is_running = False
