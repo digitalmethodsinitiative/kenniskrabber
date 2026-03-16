@@ -1,0 +1,76 @@
+:root {
+    --background: #fbf1d0;
+    --background-secondary: #fffbec;
+    --primary: #1c5276;
+    --accent: #c1350c;
+    --positive: #f5a30f;
+}
+
+body {
+    font-family: "Open Sans", sans-serif;
+    color: var(--primary);
+    background: var(--background) url("/static/background_sm.png") repeat;
+    background-size: 400px;
+}
+
+h1, h2, h3, h4, h5, h6 {
+    font-family: "Nerko One", cursive;
+}
+
+.nicegui-header {
+    color: var(--background);
+    background-color: var(--accent);
+    border-bottom: 4px solid var(--primary);
+}
+
+.nicegui-header .nicegui-image {
+    border-right: 4px solid var(--primary);
+}
+
+.nicegui-header .main-title {
+    font-size: 1.8rem;
+    font-family: "Nerko One", cursive;
+    color: var(--background-secondary);
+}
+.nicegui-header .main-title.version {
+    font-size: 1rem;
+    color: var(--background);
+}
+
+.nicegui-label {
+    color: var(--primary);
+}
+
+.nicegui-card {
+    background-color: var(--background-secondary);
+    border-radius: 10px;
+    border: 3px solid var(--primary);
+}
+
+.card-title {
+    font-size: 1.6rem;
+    font-family: "Nerko One", cursive;
+    border-bottom: 2px solid var(--primary);
+}
+.nicegui-scroll-area {
+    background-color: var(--background);
+    color: var(--positive);
+    border: 3px solid var(--primary);
+    border-radius: 10px;
+}
+
+.text-blue {
+    color: var(--primary) !important;
+}
+
+.text-orange {
+    color: var(--positive) !important;
+}
+
+.text-red {
+    color: var(--accent) !important;
+}
+
+.footer-text {
+    color: var(--primary);
+}

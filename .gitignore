@@ -1,0 +1,4 @@
+.venv
+.idea
+scrapes/
+search_cookies.pkl
