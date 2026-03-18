@@ -3,6 +3,7 @@ import csv
 import os
 import hashlib
 import time
+from collections import deque
 from typing import Callable, Optional
 import re
 import sys
@@ -45,9 +46,34 @@ def get_default_output_dir(input_file=False):
     return default_path
 
 class GoogleAIScraper:
+    # Default CSS selectors for AI Overview scraping
+    DEFAULT_AO_SELECTORS = {
+        "ao_container": "#eKIzJc",
+        "ao_show_more": "div.Jzkafd[role='button']",
+        "ao_failed_elements": ".YWpX0d[style='']",
+        "ao_inner_text": "div[jsname][data-rl] > div:not([id]) div[data-container-id='main-col']",
+        "ao_show_more_urls": "#rw0ISc",
+        "ao_url_divs": "li.CyMdWb > div",
+        "ao_url_divs_fallback": ".MimRQe",
+        "ao_url_attribution": "div[data-attrid='SGEAttributionFeedback']",
+        "ao_url_description": ".vhJ6Pe > span[data-crb-snippet-text]",
+        "ao_url_description_fallback": ".dMCttd",
+    }
+
+    # Default CSS selectors for AI Mode scraping
+    DEFAULT_AM_SELECTORS = {
+        "am_answers_container": "div[data-xid='aim-mars-turn-root']",
+        "am_answers": "#aim-chrome-initial-inline-async-container div[data-container-id=main-col]",
+        "am_processed_answer": "section #aim-chrome-initial-inline-async-container > div[data-processed=true] div.pWvJNd",
+        "am_show_more_urls": "div[data-processed=true] > div.BjvG9b",
+        "am_url_box": "li.CyMdWb > div[data-complete=true]",
+        "am_url_description": ".vhJ6Pe",
+    }
+
     def __init__(self, scrape_mode="both", base_url=None, profile="", iterate_queries=set(),
                  inserted_queries=None, query_file=None, results_file="", output_dir="", offset=0,
                  shuffle_queries=False, generating_strings=None, throttled_strings=None,
+                 ao_selectors=None, am_selectors=None,
                  progress_callback=None, log_callback=None):
         self.scrape_mode = scrape_mode
         self.base_url = base_url if base_url else "https://www.google.com/"
@@ -64,6 +90,8 @@ class GoogleAIScraper:
             "Searching", "Generating", "Thinking..."]
         self.throttled_strings = [t_s.strip() for t_s in throttled_strings.split(",")] if throttled_strings else [
             "Try again later", "Something went wrong"]
+        self.ao_selectors = {**self.DEFAULT_AO_SELECTORS, **(ao_selectors or {})}
+        self.am_selectors = {**self.DEFAULT_AM_SELECTORS, **(am_selectors or {})}
         self.progress_callback = progress_callback
         self.log_callback: Optional[Callable] = log_callback
         self.profile = profile
@@ -71,6 +99,7 @@ class GoogleAIScraper:
 
         self.finished_ai_overview_queries = set()
         self.finished_ai_mode_queries = set()
+        self.scrape_durations = deque(maxlen=20)
 
     def log(self, msg, classes=None):
         """Send messages to the NiceGUI log UI"""
@@ -164,16 +193,19 @@ class GoogleAIScraper:
 
             if os.path.isfile(self.results_file):
                 self.log("Found existing results file. Assuming you want to skip already scraped queries.", classes="text-orange")
-                with open(self.results_file, "rb") as f:
+                with open(self.results_file, "r", encoding="utf-8") as f:
                     for line in f.readlines():
+                        line = line.strip()
+                        if not line:
+                            continue
                         try:
                             finished_query = json.loads(line)
-                            if finished_query.get("mode") == "ai_overviews":
+                            if finished_query.get("mode") == "ai_overview":
                                 self.finished_ai_overview_queries.add(finished_query["id"])
-                            if finished_query.get("mode") == "ai_modes":
+                            if finished_query.get("mode") == "ai_mode":
                                 self.finished_ai_mode_queries.add(finished_query["id"])
-                        except:
-                            pass
+                        except Exception as parse_err:
+                            self.log(f"Warning: could not parse results line: {parse_err}", classes="text-orange")
                 self.log(
                     f"Already collected {len(self.finished_ai_overview_queries)} AI Overviews and {len(self.finished_ai_mode_queries)} AI Modes", classes="text-orange")
 
@@ -251,7 +283,7 @@ class GoogleAIScraper:
                     else:
                         self.log("Already scraped AI Mode data, skipping", classes="text-orange")
 
-            if self.is_running:
+            if self.is_running and self.results_file:
                 self.log("Converting results JSON to csv")
                 with open(self.results_file, "r", encoding="utf-8") as in_json:
                     with open(self.results_file[:-5] + ".csv", "w", encoding="utf-8", newline="") as out_csv:
@@ -265,9 +297,11 @@ class GoogleAIScraper:
                             writer.writerow(csv_line)
 
                 self.log("Done! Scraping completed successfully.", classes="text-blue")
-
+            else:
+                self.log("No AI output found...", classes="text-red")
         except Exception as e:
             self.log(f"ERROR: {str(e)}", classes="text-red")
+            print(str(e))
             import traceback
             self.log(traceback.format_exc())
         finally:
@@ -276,8 +310,9 @@ class GoogleAIScraper:
 
     def parse_ai_overview(self, page_id, query) -> dict:
         time.sleep(1)
+        sel = self.ao_selectors
         while True:
-            ai_overview = self.driver.find_elements(by=By.CSS_SELECTOR, value="#eKIzJc")
+            ai_overview = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_container"])
             if ai_overview and ai_overview[0].is_displayed():
                 ai_overview = ai_overview[0]
                 ai_overview_inner = ai_overview.text
@@ -286,9 +321,9 @@ class GoogleAIScraper:
                     retries = 0
                     while retries <= 5:
                         retries += 1
-                        self.log("AI overview answer may not be done generating, waiting 2 secs...", classes="text-orange")
+                        self.log("AI Overview may not be done generating, waiting 2 secs...", classes="text-orange")
                         time.sleep(2)
-                        ai_overview = self.driver.find_elements(by=By.CSS_SELECTOR, value="#eKIzJc")
+                        ai_overview = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_container"])
                         if ai_overview:
                             ai_overview = ai_overview[0]
                             break
@@ -305,15 +340,17 @@ class GoogleAIScraper:
                     "sources": []
                 }
 
-                show_more_button = self.driver.find_elements(by=By.CSS_SELECTOR, value="div.zNsLfb.Jzkafd")
-                failed_elements = ai_overview.find_elements(by=By.CSS_SELECTOR, value=".YWpX0d[style='']")
-                throttled = False
-                ai_overview_inner_text = ai_overview.find_elements(by=By.CSS_SELECTOR, value=".YWpX0d")
+                show_more_button = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_show_more"])
+                failed_elements = ai_overview.find_elements(by=By.CSS_SELECTOR, value=sel["ao_failed_elements"])
+                throttled = None
+                ai_overview_inner_text = ai_overview.find_elements(by=By.CSS_SELECTOR, value=sel["ao_inner_text"])
                 if ai_overview_inner_text:
                     ai_overview_inner_text = ai_overview_inner_text[0].get_attribute("innerHTML")
-                if ai_overview_inner_text and any(
-                        throttled_string in ai_overview_inner_text for throttled_string in self.throttled_strings):
-                    throttled = True
+                if ai_overview_inner_text:
+                    for throttled_string in self.throttled_strings:
+                        if throttled_string in ai_overview_inner_text:
+                            throttled = throttled_string
+                            break
 
                 if not show_more_button and (failed_elements or throttled):
                     if failed_elements:
@@ -323,7 +360,7 @@ class GoogleAIScraper:
                     ai_overview_data["not_available"] = True
 
                     if throttled:
-                        self.log("Throttled, trying again in 10 minutes", classes="text-orange")
+                        self.log(f"Throttled (found: '{throttled}'), trying again in 10 minutes", classes="text-orange")
                         time.sleep(600)
                         self.driver.refresh()
                         self.check_for_captcha()
@@ -335,47 +372,49 @@ class GoogleAIScraper:
                         except (StaleElementReferenceException, ElementNotInteractableException):
                             self.log("Could not find the 'Show more' button anymore, continuing", classes="text-orange")
 
-                    show_more_urls_button = ai_overview.find_elements(by=By.CSS_SELECTOR,
-                                                                      value="li > div > div.niO4u.VDgVie.SlP8xc")
-                    if show_more_urls_button:
-                        for show_more_button in show_more_urls_button:
-                            self.wait.until(lambda _: show_more_button.is_displayed())
-                            if show_more_button.is_displayed():
-                                try:
-                                    show_more_button.click()
-                                except ElementNotInteractableException:
-                                    self.log("ERROR: Could not expand URL box, continuing anyway", classes="text-orange")
-
-                    ai_overview_html = None
+                    ai_overview_inner = None
                     retry_ai_overview_count = 0
-                    while not ai_overview_html:
-                        ai_overview_html = ai_overview.find_elements(by=By.CSS_SELECTOR,
-                                                                     value="div[jsname][data-rl] > div:not([id])")
+                    while not ai_overview_inner:
+                        ai_overview_inner = ai_overview.find_elements(by=By.CSS_SELECTOR,
+                                                                     value=sel["ao_inner_text"])
 
                         retry_ai_overview_count += 1
                         if retry_ai_overview_count > 5:
                             self.log("AI Overview hidden or not found, skipping...", classes="text-orange")
                             return {}
 
-                    ai_overview_html = ai_overview_html[0]
-                    ai_overview_html = ai_overview_html.get_attribute("outerHTML")
+                    ai_overview_inner = ai_overview_inner[0].get_attribute("outerHTML")
 
-                    ai_overview_contents_md = md(ai_overview_html, strip=["a", "img"])
+                    ai_overview_contents_md = md(ai_overview_inner, strip=["a", "img"])
                     ai_overview_data["text"] = ai_overview_contents_md
 
+                    show_more_urls_button = ai_overview.find_elements(by=By.CSS_SELECTOR,
+                                                                      value=sel["ao_show_more_urls"])
+                    if show_more_urls_button:
+                        for show_more_url_button in show_more_urls_button:
+                            try:
+                                self.wait.until(lambda _: show_more_url_button.is_displayed())
+                                if show_more_url_button.is_displayed():
+                                    try:
+                                        show_more_url_button.click()
+                                    except ElementNotInteractableException:
+                                        self.log("ERROR: Could not expand URL box, continuing anyway", classes="text-orange")
+                            except TimeoutException:
+                                self.log("ERROR: Could not expand URL box, continuing anyway", classes="text-orange")
+
                     urls = []
-                    url_divs = self.driver.find_elements(by=By.CSS_SELECTOR, value="ul.zVKf0d.w2xCsc > li.LLtSOc")
+                    url_divs = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_divs"])
                     if not url_divs:
                         url_divs = self.driver.find_elements(by=By.CSS_SELECTOR,
-                                                             value="ul.zVKf0d.Cgh8Qc > li.LLtSOc")
+                                                             value=sel["ao_url_divs_fallback"])
                     url_divs += self.driver.find_elements(by=By.CSS_SELECTOR,
-                                                          value="div[data-attrid='SGEAttributionFeedback']")
+                                                          value=sel["ao_url_attribution"])
                     for url_div in url_divs:
                         if url_div.is_displayed():
                             url_div_a = url_div.find_element(by=By.CSS_SELECTOR, value="a")
                             url_div_url = url_div_a.get_attribute("href")
-                            url_div_description = url_div.find_elements(by=By.CSS_SELECTOR, value=".gxZfx")
-                            url_div_description += url_div.find_elements(by=By.CSS_SELECTOR, value=".dMCttd")
+                            url_div_description = url_div.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_description"])
+                            url_div_description += url_div.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_description_fallback"])
                             description = url_div_description[0].text if url_div_description else ""
 
                             url = {
@@ -394,22 +433,25 @@ class GoogleAIScraper:
 
     def parse_ai_mode(self, page_id, query) -> dict:
         time.sleep(4)
+
+        sel = self.am_selectors
+
         while True:
-            ai_mode = self.driver.find_elements(by=By.CSS_SELECTOR, value="section")
+            ai_mode = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["am_answers_container"])
             if ai_mode and ai_mode[0].is_displayed():
                 ai_mode = ai_mode[0]
                 ai_mode_inner = ai_mode.text
 
                 if (any(generating_string in ai_mode_inner for generating_string in self.generating_strings)
                         or not ai_mode.find_elements(by=By.CSS_SELECTOR,
-                                                     value="section #aim-chrome-initial-inline-async-container > div[data-processed=true]")):
+                                                     value=sel["am_processed_answer"])):
                     retries = 0
                     while retries <= 5:
                         retries += 1
-                        self.log("AI overview may not be done generating, waiting 2 secs...", classes="text-orange")
+                        self.log("AI Overview may not be done generating, waiting 2 secs...", classes="text-orange")
                         time.sleep(2)
                         generated = True if ai_mode.find_elements(by=By.CSS_SELECTOR,
-                                                                  value="section #aim-chrome-initial-inline-async-container > div[data-processed=true]") else False
+                                                                  value=sel["am_processed_answer"]) else False
                         if generated:
                             break
                 time.sleep(1)
@@ -426,35 +468,36 @@ class GoogleAIScraper:
                     "sources": []
                 }
 
-                throttled = False
-                if any(throttled_string in ai_mode_inner for throttled_string in self.throttled_strings):
-                    throttled = True
+                throttled = None
+                for throttled_string in self.throttled_strings:
+                    if throttled_string in ai_mode_inner:
+                        throttled = throttled_string
+                        break
                 if throttled:
-                    self.log("Throttled, trying again in 10 minutes. Keep the browser window open.", classes="text-orange")
+                    self.log(f"Throttled (found: '{throttled}'), trying again in 10 minutes. Keep the browser window open.", classes="text-orange")
                     time.sleep(600)
                     self.driver.refresh()
                     self.check_for_captcha()
                     continue
 
                 show_more_urls_button = ai_mode.find_elements(by=By.CSS_SELECTOR,
-                                                              value="div[data-processed=true] > div.BjvG9b")
+                                                              value=sel["am_show_more_urls"])
                 if show_more_urls_button:
-                    for show_more_button in show_more_urls_button:
+                    for show_more_url_button in show_more_urls_button:
                         try:
-                            self.wait.until(lambda _: show_more_button.is_displayed())
-                            if show_more_button.is_displayed():
+                            self.wait.until(lambda _: show_more_url_button.is_displayed())
+                            if show_more_url_button.is_displayed():
                                 try:
-                                    show_more_button.click()
+                                    show_more_url_button.click()
                                 except ElementNotInteractableException:
                                     self.log("ERROR: Could not expand URL box, continuing anyway", classes="text-orange")
                         except TimeoutException:
                             self.log("ERROR: Could not expand URL box, continuing anyway", classes="text-orange")
 
-                main_col_id = "#aim-chrome-initial-inline-async-container div[data-container-id=main-col]"
-                ai_mode_html = ai_mode.find_elements(by=By.CSS_SELECTOR, value=main_col_id)
+                ai_mode_html = ai_mode.find_elements(by=By.CSS_SELECTOR, value=sel["am_answers"])
                 if not ai_mode_html:
                     time.sleep(6)
-                    ai_mode.find_elements(by=By.CSS_SELECTOR, value=main_col_id)
+                    ai_mode.find_elements(by=By.CSS_SELECTOR, value=sel["am_answers"])
                 ai_mode_html = ai_mode_html[0]
                 ai_mode_html = ai_mode_html.get_attribute("outerHTML")
 
@@ -462,12 +505,12 @@ class GoogleAIScraper:
                 ai_mode_data["text"] = ai_mode_contents_md.split("AI-reactions can")[0]
 
                 urls = []
-                url_divs = self.driver.find_elements(by=By.CSS_SELECTOR, value="li.CyMdWb > div > div[data-ved]")
+                url_divs = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["am_url_box"])
 
                 for url_div in url_divs:
                     url_div_a = url_div.find_element(by=By.CSS_SELECTOR, value="a")
                     url_div_url = url_div_a.get_attribute("href")
-                    url_div_description = url_div.find_elements(by=By.CSS_SELECTOR, value=".vhJ6Pe")
+                    url_div_description = url_div.find_elements(by=By.CSS_SELECTOR, value=sel["am_url_description"])
                     description = url_div_description[0].text if url_div_description else ""
 
                     url = {
@@ -561,12 +604,14 @@ class GoogleAIScraper:
         return query.lower().strip().replace(" ", "+")
 
     def print_elapsed_time(self, start_time, n_urls, count):
-        end = time.time()
-        time_elapsed = end - start_time
-        td = timedelta(seconds=(n_urls - count) * time_elapsed)
+        duration = time.time() - start_time
+        self.scrape_durations.append(duration)
+        avg_duration = sum(self.scrape_durations) / len(self.scrape_durations)
+        remaining = n_urls - count
+        td = timedelta(seconds=remaining * avg_duration)
         total_minutes = td.seconds // 60
         hours, minutes = divmod(total_minutes, 60)
-        self.log(f"Processed in {time_elapsed:.2f} seconds, {hours} hours and {minutes} minutes left")
+        self.log(f"Processed in {duration:.2f}s (avg {avg_duration:.2f}s over last {len(self.scrape_durations)}), {hours}h {minutes}m left")
 
 
 # NICEGUI INTERFACE
@@ -641,10 +686,65 @@ class GUI:
                         self.tld = ui.input('Top-level domain', value='.com').classes('flex-grow')
                         self.offset = ui.number('Offset', value=0, format='%.0f').classes('flex-grow')
 
-                    self.gen_strings = ui.input('Generating text', value='Searching, Generating, Thinking').classes(
-                        'w-full')
-                    self.throttle_strings = ui.input('Throttled text',
-                                                     value='Something went wrong, Try again later').classes('w-full')
+                    with ui.row().classes('w-full items-center gap-1'):
+                        self.gen_strings = ui.input('Generating text', value='Searching, Generating, Thinking').classes('flex-grow')
+                        with ui.icon('help_outline').classes('text-grey cursor-pointer'):
+                            ui.tooltip('Comma-separated, case-sensitive texts that appear while an AI Overview/Mode answer is still generating, in the language of your Google (e.g. "Searching, Generating, Thinking")')
+                    with ui.row().classes('w-full items-center gap-1'):
+                        self.throttle_strings = ui.input('Throttled text', value='Something went wrong, Try again later').classes('flex-grow')
+                        with ui.icon('help_outline').classes('text-grey cursor-pointer'):
+                            ui.tooltip('Comma-separated, case-sensitive texts that appear when Google throttles your AI Overview/Mode requests, in the language of your Google (e.g. "Something went wrong, Try again later")')
+
+                    # CSS Selectors accordion
+                    AO_SELECTOR_META = {
+                        "ao_container": ("Container", "Main AI Overview container element"),
+                        "ao_show_more": ("Show more btn", "Button to expand the full AI Overview"),
+                        "ao_failed_elements": ("Failed elements", "Elements indicating AI Overview failed to load"),
+                        "ao_inner_text": ("Inner text", "Element containing the AI Overview inner text"),
+                        "ao_show_more_urls": ("Show more URLs btn", "Button to expand the source URL list"),
+                        "ao_url_divs": ("URL items", "List items for source URLs (primary)"),
+                        "ao_url_divs_fallback": ("URL items fallback", "List items for source URLs (fallback)"),
+                        "ao_url_attribution": ("URL attribution", "Attribution feedback div for sources"),
+                        "ao_url_description": ("URL description", "Element with the source description text"),
+                        "ao_url_description_fallback": ("URL desc. fallback", "Fallback element for source description"),
+                    }
+                    AM_SELECTOR_META = {
+                        "am_answers_container": ("Container", "Main AI Mode answers container element"),
+                        "am_answers": ("Answers", "Element containing the AI Mode answer content"),
+                        "am_processed_answer": ("Processed answer", "Element indicating the answer is fully generated"),
+                        "am_show_more_urls": ("Show more URLs btn", "Button to expand the source URL list"),
+                        "am_url_box": ("URL items", "List items for source URLs"),
+                        "am_url_description": ("URL description", "Element with the source description text"),
+                    }
+
+                    with ui.expansion('CSS Selectors').classes('w-full'):
+                        self.selector_toggle = ui.toggle(
+                            ['AI Overview', 'AI Mode'], value='AI Overview'
+                        ).classes('w-full mb-2').props('spread no-wrap')
+
+                        # AI Overview selectors panel
+                        self.ao_selector_inputs = {}
+                        ao_defaults = GoogleAIScraper.DEFAULT_AO_SELECTORS
+                        with ui.column().classes('w-full gap-1').bind_visibility_from(
+                                self.selector_toggle, 'value', value='AI Overview') as self.ao_panel:
+                            for key, (label, tooltip) in AO_SELECTOR_META.items():
+                                with ui.row().classes('w-full items-center gap-1'):
+                                    inp = ui.input(label, value=ao_defaults[key]).classes('flex-grow').props('dense')
+                                    with ui.icon('help_outline').classes('text-grey cursor-pointer'):
+                                        ui.tooltip(tooltip)
+                                    self.ao_selector_inputs[key] = inp
+
+                        # AI Mode selectors panel
+                        self.am_selector_inputs = {}
+                        am_defaults = GoogleAIScraper.DEFAULT_AM_SELECTORS
+                        with ui.column().classes('w-full gap-1').bind_visibility_from(
+                                self.selector_toggle, 'value', value='AI Mode') as self.am_panel:
+                            for key, (label, tooltip) in AM_SELECTOR_META.items():
+                                with ui.row().classes('w-full items-center gap-1'):
+                                    inp = ui.input(label, value=am_defaults[key]).classes('flex-grow').props('dense')
+                                    with ui.icon('help_outline').classes('text-grey cursor-pointer'):
+                                        ui.tooltip(tooltip)
+                                    self.am_selector_inputs[key] = inp
             # LOGS AND ACTIONS
             with ui.column().classes('w-1/2 min-w-[400px] flex-grow'):
                 with ui.card().classes('w-full'):
@@ -664,6 +764,10 @@ class GUI:
 
                     self.progress_label = ui.label('Progress: 0/0')
                     self.progress_bar = ui.linear_progress(value=0, show_value=False).classes('w-full mb-4')
+
+                    self.btn_open_folder = ui.button('Open output folder', color='red', on_click=self.open_output_folder) \
+                        .classes('w-full').props('flat')
+                    self.btn_open_folder.set_visibility(False)
 
                     self.log_scroll = ui.scroll_area().classes('w-full h-full rounded')
                     with self.log_scroll:
@@ -689,6 +793,7 @@ class GUI:
 
     async def on_prepare(self):
         self.log_clear()
+        self.btn_open_folder.set_visibility(False)
         self.btn_prepare.disable()
 
         # Handle the temporary query file if user used text area
@@ -729,6 +834,8 @@ class GUI:
             offset=int(self.offset.value),
             generating_strings=self.gen_strings.value,
             throttled_strings=self.throttle_strings.value,
+            ao_selectors={k: inp.value for k, inp in self.ao_selector_inputs.items()},
+            am_selectors={k: inp.value for k, inp in self.am_selector_inputs.items()},
             progress_callback=self.update_progress,
             log_callback=self.log_push  # Send all scraper prints straight to the GUI
         )
@@ -750,11 +857,24 @@ class GUI:
 
         self.btn_prepare.enable()
         self.btn_stop.disable()
+        self.btn_open_folder.set_visibility(True)
 
     def on_stop(self):
         self.btn_stop.disable()
         if self.scraper:
             self.scraper.stop()
+
+    def open_output_folder(self):
+        output_dir = self.output_dir.value
+        if output_dir and os.path.isdir(output_dir):
+            if sys.platform == 'win32':
+                os.startfile(output_dir)
+            elif sys.platform == 'darwin':
+                import subprocess
+                subprocess.Popen(['open', output_dir])
+            else:
+                import subprocess
+                subprocess.Popen(['xdg-open', output_dir])
 
 
 from nicegui import app as nicegui_app
