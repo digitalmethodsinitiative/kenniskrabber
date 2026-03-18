@@ -54,7 +54,7 @@ class GoogleAIScraper:
         "ao_inner_text": "div[jsname][data-rl] > div:not([id]) div[data-container-id='main-col']",
         "ao_show_more_urls": "#rw0ISc",
         "ao_url_divs": "li.CyMdWb > div",
-        "ao_url_divs_fallback": ".MimRQe",
+        "ao_url_divs_no_show_more_button": "li.jydCyd > div[data-src-id]",
         "ao_url_attribution": "div[data-attrid='SGEAttributionFeedback']",
         "ao_url_description": ".vhJ6Pe > span[data-crb-snippet-text]",
         "ao_url_description_fallback": ".dMCttd",
@@ -328,6 +328,19 @@ class GoogleAIScraper:
                             ai_overview = ai_overview[0]
                             break
 
+                # Wait for as long as the 'generating' animations are there.
+                generating_waits = 0
+                while generating_waits < 10:
+                    generating_div = ai_overview.find_elements(by=By.CSS_SELECTOR, value="#folsrch-ghost")
+                    if generating_div and generating_div[0].is_displayed():
+                        time.sleep(0.5)
+                        generating_waits += 1
+                        continue
+                    break
+                else:
+                    self.log("Warning: #folsrch-ghost never appeared, continuing anyway", classes="text-orange")
+
+
                 ai_overview_data = {
                     "mode": "ai_overview",
                     "id": page_id,
@@ -388,8 +401,11 @@ class GoogleAIScraper:
                     ai_overview_contents_md = md(ai_overview_inner, strip=["a", "img"])
                     ai_overview_data["text"] = ai_overview_contents_md
 
+                    # Get sources
+                    urls = []
                     show_more_urls_button = ai_overview.find_elements(by=By.CSS_SELECTOR,
                                                                       value=sel["ao_show_more_urls"])
+                    # If there's 3 sources or a horizontal scroller, you can't expand
                     if show_more_urls_button:
                         for show_more_url_button in show_more_urls_button:
                             try:
@@ -402,11 +418,11 @@ class GoogleAIScraper:
                             except TimeoutException:
                                 self.log("ERROR: Could not expand URL box, continuing anyway", classes="text-orange")
 
-                    urls = []
-                    url_divs = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_divs"])
-                    if not url_divs:
+
+                        url_divs = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_divs"])
+                    else:
                         url_divs = self.driver.find_elements(by=By.CSS_SELECTOR,
-                                                             value=sel["ao_url_divs_fallback"])
+                                                             value=sel["ao_url_divs_no_show_more_button"])
                     url_divs += self.driver.find_elements(by=By.CSS_SELECTOR,
                                                           value=sel["ao_url_attribution"])
                     for url_div in url_divs:
@@ -454,7 +470,8 @@ class GoogleAIScraper:
                                                                   value=sel["am_processed_answer"]) else False
                         if generated:
                             break
-                time.sleep(1)
+
+                time.sleep(2)
 
                 ai_mode_data = {
                     "mode": "ai_mode",
@@ -702,8 +719,9 @@ class GUI:
                         "ao_failed_elements": ("Failed elements", "Elements indicating AI Overview failed to load"),
                         "ao_inner_text": ("Inner text", "Element containing the AI Overview inner text"),
                         "ao_show_more_urls": ("Show more URLs btn", "Button to expand the source URL list"),
-                        "ao_url_divs": ("URL items", "List items for source URLs (primary)"),
-                        "ao_url_divs_fallback": ("URL items fallback", "List items for source URLs (fallback)"),
+                        "ao_url_divs": ("URL items", "List items for sources after clicking the 'Show more' button"),
+                        "ao_url_divs_no_show_more_button": ("URL items without 'show more'", "List items for sources if there's no 'Show more"
+                                                                                             "  button."),
                         "ao_url_attribution": ("URL attribution", "Attribution feedback div for sources"),
                         "ao_url_description": ("URL description", "Element with the source description text"),
                         "ao_url_description_fallback": ("URL desc. fallback", "Fallback element for source description"),
@@ -765,8 +783,8 @@ class GUI:
                     self.progress_label = ui.label('Progress: 0/0')
                     self.progress_bar = ui.linear_progress(value=0, show_value=False).classes('w-full mb-4')
 
-                    self.btn_open_folder = ui.button('Open output folder', classes='flex-grow', color='red', on_click=self.open_output_folder) \
-                        .classes('w-full').props('flat')
+                    self.btn_open_folder = ui.button('Open output folder', color='red', on_click=self.open_output_folder) \
+                        .classes('w-full flex-grow')
                     self.btn_open_folder.set_visibility(False)
 
                     self.log_scroll = ui.scroll_area().classes('w-full h-full rounded')
