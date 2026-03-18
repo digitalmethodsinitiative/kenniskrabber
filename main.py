@@ -765,7 +765,7 @@ class GUI:
                     self.progress_label = ui.label('Progress: 0/0')
                     self.progress_bar = ui.linear_progress(value=0, show_value=False).classes('w-full mb-4')
 
-                    self.btn_open_folder = ui.button('Open output folder', color='red', on_click=self.open_output_folder) \
+                    self.btn_open_folder = ui.button('Open output folder', classes='flex-grow', color='red', on_click=self.open_output_folder) \
                         .classes('w-full').props('flat')
                     self.btn_open_folder.set_visibility(False)
 
