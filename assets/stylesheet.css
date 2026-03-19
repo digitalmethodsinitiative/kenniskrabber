@@ -9,7 +9,7 @@
 body {
     font-family: "Open Sans", sans-serif;
     color: var(--primary);
-    background: var(--background) url("/static/background_sm.png") repeat;
+    background: var(--background) url("assets/background_sm.png") repeat;
     background-size: 400px;
 }
 
@@ -60,15 +60,15 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .text-blue {
-    color: var(--primary) !important;
+    color: var(--primary);
 }
 
 .text-orange {
-    color: var(--positive) !important;
+    color: var(--positive);
 }
 
 .text-red {
-    color: var(--accent) !important;
+    color: var(--accent);
 }
 
 .footer-text {

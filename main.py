@@ -22,6 +22,10 @@ from selenium.webdriver.support.wait import WebDriverWait
 
 from nicegui import ui, run
 
+if getattr(sys, 'frozen', False):
+    base_path = sys._MEIPASS
+else:
+    base_path = os.path.abspath(os.path.dirname(__file__))
 
 def get_default_output_dir(input_file=False):
     """Gets the folder where the app is running and creates a default 'scrapes' path."""
@@ -633,11 +637,11 @@ class GoogleAIScraper:
 
 # NICEGUI INTERFACE
 def load_readme() -> str:
-    with open('README.md', 'r', encoding='utf-8') as file:
+    with open(os.path.join(base_path, 'README.md'), 'r', encoding='utf-8') as file:
         return "\n".join(file.readlines())
 
 def load_css() -> str:
-    with open('stylesheet.css', 'r', encoding='utf-8') as file:
+    with open(os.path.join(base_path, 'assets', 'stylesheet.css'), 'r', encoding='utf-8') as file:
         return file.read()
 
 class GUI:
@@ -659,7 +663,7 @@ class GUI:
         ui.add_css(load_css())
 
         with ui.header().classes('bg-primary text-blue p-0 gap-0'):
-            ui.image('logo_cutout.png').style('width: 75px; height: 75px; object-fit: cover; flex-shrink: 0;')
+            ui.image(os.path.join(base_path, 'assets', 'logo_cutout.png')).style('width: 75px; height: 75px; object-fit: cover; flex-shrink: 0;')
             with ui.row().classes('p-4 self-center items-baseline gap-3'):
                 ui.label('Kenniskrabber').classes('main-title');
                 ui.label('v0.5').classes('main-title version')
@@ -894,17 +898,12 @@ class GUI:
                 import subprocess
                 subprocess.Popen(['xdg-open', output_dir])
 
-
 from nicegui import app as nicegui_app
 
-def root():
-    ui.label('Hello from PyInstaller')
+nicegui_app.add_static_files('/static', base_path)
 
-if getattr(sys, 'frozen', False):
-    base_path = sys._MEIPASS
-else:
-    base_path = os.path.dirname(os.path.abspath(__file__))
+@ui.page('/')
+def index():
+    GUI()
 
-nicegui_app.add_static_files('/static', os.path.dirname(os.path.abspath(__file__)))
-gui = GUI()
-ui.run(root, title='Kenniskrabber', native=True, reload=False, window_size=(500, 800))
+ui.run(title='Kenniskrabber', native=True, reload=False, window_size=(500, 800))
