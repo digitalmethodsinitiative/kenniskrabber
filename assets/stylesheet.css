@@ -9,7 +9,7 @@
 body {
     font-family: "Open Sans", sans-serif;
     color: var(--primary);
-    background: var(--background) url("assets/background_sm.png") repeat;
+    background: var(--background) url("/static/assets/background_sm.png") repeat;
     background-size: 400px;
 }
 

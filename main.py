@@ -58,9 +58,10 @@ class GoogleAIScraper:
         "ao_inner_text": "div[jsname][data-rl] > div:not([id]) div[data-container-id='main-col']",
         "ao_show_more_urls": "#rw0ISc",
         "ao_url_divs": "li.CyMdWb > div",
-        "ao_url_divs_no_show_more_button": "li.jydCyd > div[data-src-id]",
-        "ao_url_attribution": "div[data-attrid='SGEAttributionFeedback']",
-        "ao_url_description": ".vhJ6Pe > span[data-crb-snippet-text]",
+        "ao_url_divs_not_expandable": "ul > li[data-processed] > div[data-src-id]",
+        "ao_url_divs_carousel": "div[role='listitem'] > div[data-src-id]",
+        "ao_url_title": "div[id]",
+        "ao_url_description": "span[data-crb-snippet-text]",
         "ao_url_description_fallback": ".dMCttd",
     }
 
@@ -76,7 +77,7 @@ class GoogleAIScraper:
 
     def __init__(self, scrape_mode="both", base_url=None, profile="", iterate_queries=set(),
                  inserted_queries=None, query_file=None, results_file="", output_dir="", offset=0,
-                 shuffle_queries=False, generating_strings=None, throttled_strings=None,
+                 shuffle_queries=False, throttled_strings=None,
                  ao_selectors=None, am_selectors=None,
                  progress_callback=None, log_callback=None):
         self.scrape_mode = scrape_mode
@@ -90,8 +91,6 @@ class GoogleAIScraper:
         self.output_dir = output_dir
         self.shuffle_queries = shuffle_queries
         self.offset = offset
-        self.generating_strings = [g_s.strip() for g_s in generating_strings.split(",")] if generating_strings else [
-            "Searching", "Generating", "Thinking..."]
         self.throttled_strings = [t_s.strip() for t_s in throttled_strings.split(",")] if throttled_strings else [
             "Try again later", "Something went wrong"]
         self.ao_selectors = {**self.DEFAULT_AO_SELECTORS, **(ao_selectors or {})}
@@ -185,7 +184,7 @@ class GoogleAIScraper:
             if not os.path.isdir(self.output_dir):
                 os.makedirs(self.output_dir)
 
-            self.results_file = os.path.join(self.output_dir, "google_ai_results.json")
+            self.results_file = os.path.join(self.output_dir, f"google_ai_results.json")
 
             self.driver.get(f"{self.base_url}search?q=is scraping legal")
             self.check_for_captcha()
@@ -289,22 +288,27 @@ class GoogleAIScraper:
 
             if self.is_running and self.results_file:
                 self.log("Converting results JSON to csv")
+                csv_filename = self.results_file[:-5] + ".csv"
+                write_mode = "w" if not os.path.isfile(csv_filename) else "a"
+                if write_mode == "a":
+                    self.log("Results CSV already exists, appending")
                 with open(self.results_file, "r", encoding="utf-8") as in_json:
-                    with open(self.results_file[:-5] + ".csv", "w", encoding="utf-8", newline="") as out_csv:
-                        first_line = True
+                    with open(csv_filename, write_mode, encoding="utf-8", newline="") as out_csv:
+                        first_line = True if write_mode == "w" else False
                         for line in in_json.readlines():
                             csv_line = json.loads(line)
                             if first_line:
                                 writer = csv.DictWriter(out_csv, fieldnames=csv_line.keys())
                                 writer.writeheader()
                                 first_line = False
+                            csv_line["sources"] = self.source_to_string(csv_line["sources"]) if csv_line["sources"] else ""
                             writer.writerow(csv_line)
 
                 self.log("Done! Scraping completed successfully.", classes="text-blue")
             else:
                 self.log("No AI output found...", classes="text-red")
         except Exception as e:
-            self.log(f"ERROR: {str(e)}", classes="text-red")
+            self.log(f"Error: {str(e)}", classes="text-red")
             print(str(e))
             import traceback
             self.log(traceback.format_exc())
@@ -319,22 +323,12 @@ class GoogleAIScraper:
             ai_overview = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_container"])
             if ai_overview and ai_overview[0].is_displayed():
                 ai_overview = ai_overview[0]
-                ai_overview_inner = ai_overview.text
-
-                if any(generating_string in ai_overview_inner for generating_string in self.generating_strings):
-                    retries = 0
-                    while retries <= 5:
-                        retries += 1
-                        self.log("AI Overview may not be done generating, waiting 2 secs...", classes="text-orange")
-                        time.sleep(2)
-                        ai_overview = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_container"])
-                        if ai_overview:
-                            ai_overview = ai_overview[0]
-                            break
 
                 # Wait for as long as the 'generating' animations are there.
                 generating_waits = 0
                 while generating_waits < 10:
+                    if not ai_overview.is_enabled():
+                        ai_overview = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_container"])
                     generating_div = ai_overview.find_elements(by=By.CSS_SELECTOR, value="#folsrch-ghost")
                     if generating_div and generating_div[0].is_displayed():
                         time.sleep(0.5)
@@ -343,7 +337,6 @@ class GoogleAIScraper:
                     break
                 else:
                     self.log("Warning: #folsrch-ghost never appeared, continuing anyway", classes="text-orange")
-
 
                 ai_overview_data = {
                     "mode": "ai_overview",
@@ -402,11 +395,13 @@ class GoogleAIScraper:
 
                     ai_overview_inner = ai_overview_inner[0].get_attribute("outerHTML")
 
-                    ai_overview_contents_md = md(ai_overview_inner, strip=["a", "img"])
+                    ai_overview_contents_md = md(ai_overview_inner, strip=["a", "img", "button", "span[id]"])
                     ai_overview_data["text"] = ai_overview_contents_md
 
                     # Get sources
                     urls = []
+                    url_divs = []
+                    carousel_divs = []
                     show_more_urls_button = ai_overview.find_elements(by=By.CSS_SELECTOR,
                                                                       value=sel["ao_show_more_urls"])
                     # If there's 3 sources or a horizontal scroller, you can't expand
@@ -417,20 +412,29 @@ class GoogleAIScraper:
                                 if show_more_url_button.is_displayed():
                                     try:
                                         show_more_url_button.click()
+                                        url_divs = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_divs"])
                                     except ElementNotInteractableException:
                                         self.log("ERROR: Could not expand URL box, continuing anyway", classes="text-orange")
                             except TimeoutException:
+                                # Sometimes the button never shows up
+                                url_divs = self.driver.find_elements(by=By.CSS_SELECTOR,
+                                                             value=sel["ao_url_divs_not_expandable"])
                                 self.log("ERROR: Could not expand URL box, continuing anyway", classes="text-orange")
 
-
-                        url_divs = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_divs"])
                     else:
-                        url_divs = self.driver.find_elements(by=By.CSS_SELECTOR,
-                                                             value=sel["ao_url_divs_no_show_more_button"])
-                    url_divs += self.driver.find_elements(by=By.CSS_SELECTOR,
-                                                          value=sel["ao_url_attribution"])
+                        carousel_divs = ai_overview.find_elements(by=By.CSS_SELECTOR,
+                                                                          value=sel["ao_url_divs_carousel"])
+                        # Carousel of sources underneath AI Overview
+                        if carousel_divs:
+                            url_divs = carousel_divs
+                        # Else it's a blue box with non-expandable sources
+                        else:
+                            url_divs = self.driver.find_elements(by=By.CSS_SELECTOR,
+                                                             value=sel["ao_url_divs_not_expandable"])
+
                     for url_div in url_divs:
                         if url_div.is_displayed():
+                            url_div_title = url_div.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_title"])[0].text
                             url_div_a = url_div.find_element(by=By.CSS_SELECTOR, value="a")
                             url_div_url = url_div_a.get_attribute("href")
                             url_div_description = url_div.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_description"])
@@ -438,7 +442,7 @@ class GoogleAIScraper:
                             description = url_div_description[0].text if url_div_description else ""
 
                             url = {
-                                "title": url_div_a.get_attribute("aria-label"),
+                                "title": url_div_title,
                                 "description": description,
                                 "domain": urlparse(url_div_url).netloc,
                                 "url": url_div_url,
@@ -462,9 +466,7 @@ class GoogleAIScraper:
                 ai_mode = ai_mode[0]
                 ai_mode_inner = ai_mode.text
 
-                if (any(generating_string in ai_mode_inner for generating_string in self.generating_strings)
-                        or not ai_mode.find_elements(by=By.CSS_SELECTOR,
-                                                     value=sel["am_processed_answer"])):
+                if not ai_mode.find_elements(by=By.CSS_SELECTOR, value=sel["am_processed_answer"]):
                     retries = 0
                     while retries <= 5:
                         retries += 1
@@ -632,7 +634,14 @@ class GoogleAIScraper:
         td = timedelta(seconds=remaining * avg_duration)
         total_minutes = td.seconds // 60
         hours, minutes = divmod(total_minutes, 60)
-        self.log(f"Processed in {duration:.2f}s (avg {avg_duration:.2f}s over last {len(self.scrape_durations)}), {hours}h {minutes}m left")
+        self.log(f"Processed in {duration:.2f}s (avg {avg_duration:.2f}s, {hours}h {minutes}m left")
+
+    @staticmethod
+    def source_to_string(sources) -> str:
+        source_string = []
+        for source in sources:
+            source_string.append(f"{source.get('title', '')}: {source.get('description', '')} - {source.get('url', '')}")
+        return "\n".join(source_string) if source_string else ""
 
 
 # NICEGUI INTERFACE
@@ -708,10 +717,6 @@ class GUI:
                         self.offset = ui.number('Offset', value=0, format='%.0f').classes('flex-grow')
 
                     with ui.row().classes('w-full items-center gap-1'):
-                        self.gen_strings = ui.input('Generating text', value='Searching, Generating, Thinking').classes('flex-grow')
-                        with ui.icon('help_outline').classes('text-grey cursor-pointer'):
-                            ui.tooltip('Comma-separated, case-sensitive texts that appear while an AI Overview/Mode answer is still generating, in the language of your Google (e.g. "Searching, Generating, Thinking")')
-                    with ui.row().classes('w-full items-center gap-1'):
                         self.throttle_strings = ui.input('Throttled text', value='Something went wrong, Try again later').classes('flex-grow')
                         with ui.icon('help_outline').classes('text-grey cursor-pointer'):
                             ui.tooltip('Comma-separated, case-sensitive texts that appear when Google throttles your AI Overview/Mode requests, in the language of your Google (e.g. "Something went wrong, Try again later")')
@@ -723,12 +728,13 @@ class GUI:
                         "ao_failed_elements": ("Failed elements", "Elements indicating AI Overview failed to load"),
                         "ao_inner_text": ("Inner text", "Element containing the AI Overview inner text"),
                         "ao_show_more_urls": ("Show more URLs btn", "Button to expand the source URL list"),
-                        "ao_url_divs": ("URL items", "List items for sources after clicking the 'Show more' button"),
-                        "ao_url_divs_no_show_more_button": ("URL items without 'show more'", "List items for sources if there's no 'Show more"
+                        "ao_url_divs": ("Sources (expandable box)", "List items for sources after clicking the 'Show more' button"),
+                        "ao_url_divs_not_expandable": ("Sources (not expandable)", "List items for sources if there's no 'Show more"
                                                                                              "  button."),
-                        "ao_url_attribution": ("URL attribution", "Attribution feedback div for sources"),
-                        "ao_url_description": ("URL description", "Element with the source description text"),
-                        "ao_url_description_fallback": ("URL desc. fallback", "Fallback element for source description"),
+                        "ao_url_divs_carousel": ("Sources (carousel)", "List items for sources at the bottom of an AI Overview, horizontally ordered"),
+                        "ao_url_title": ("Source title", "Element within the source box that contains the source title"),
+                        "ao_url_description": ("Source description", "Element within the source box with the source description text"),
+                        "ao_url_description_fallback": ("Source desc. fallback", "Fallback element for source description"),
                     }
                     AM_SELECTOR_META = {
                         "am_answers_container": ("Container", "Main AI Mode answers container element"),
@@ -821,7 +827,7 @@ class GUI:
         # Handle the temporary query file if user used text area
         query_file = self.file_input.value
         if self.input_method.value == 'Insert queries':
-            temp_file = os.path.join(self.output_dir.value or './', 'temp_manual_queries.csv')
+            temp_file = os.path.join(self.output_dir.value or './', 'queries.csv')
             os.makedirs(os.path.dirname(temp_file), exist_ok=True)
             queries = [q.strip() for q in self.text_input.value.split('\n') if q.strip()]
 
@@ -854,7 +860,6 @@ class GUI:
             inserted_queries=self.text_input.value if self.input_method.value == self.label_insert else None,
             query_file=query_file if self.input_method.value == self.label_queryfile else None,
             offset=int(self.offset.value),
-            generating_strings=self.gen_strings.value,
             throttled_strings=self.throttle_strings.value,
             ao_selectors={k: inp.value for k, inp in self.ao_selector_inputs.items()},
             am_selectors={k: inp.value for k, inp in self.am_selector_inputs.items()},

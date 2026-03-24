@@ -1,4 +1,9 @@
 .venv
 .idea
 scrapes/
+dist/
+build/
+query_file.csv
+query_file_shuffled.csv
+Kenniskrabber.spec
 search_cookies.pkl
