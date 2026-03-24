@@ -33,7 +33,7 @@ jobs:
         if: runner.os == 'Windows'
         # ISCC is the command-line compiler for Inno Setup.
         # We use the explicit path where GitHub installs it.
-        run: "C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe" setup.iss
+        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss'
 
       - name: Build Mac DMG
         if: runner.os == 'macOS'
