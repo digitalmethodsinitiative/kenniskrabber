@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build on ${{ matrix.os }}
@@ -41,12 +44,18 @@ jobs:
           npx create-dmg@latest dist/Kenniskrabber.app --no-code-sign
           mv *.dmg Kenniskrabber-macOS.dmg
 
-      # --- CREATE RELEASE ---
-      - name: Upload to GitHub Release
+      - name: Upload Windows Release
+        if: runner.os == 'Windows'
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            InstallerOutput/Kenniskrabber_Windows_Setup.exe
-            Kenniskrabber-macOS.dmg
+          files: InstallerOutput/Kenniskrabber_Windows_Setup.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Mac Release
+        if: runner.os == 'macOS'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Kenniskrabber-macOS.dmg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
