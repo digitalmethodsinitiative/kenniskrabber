@@ -1,0 +1,52 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Build Script
+        run: python build.py
+
+      - name: Compile Windows Installer
+        if: runner.os == 'Windows'
+        # ISCC is the command-line compiler for Inno Setup.
+        # We use the explicit path where GitHub installs it.
+        run: "C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe" setup.iss
+
+      - name: Build Mac DMG
+        if: runner.os == 'macOS'
+        run: |
+          npx create-dmg@latest dist/Kenniskrabber.app --no-code-sign
+          mv *.dmg Kenniskrabber-macOS.dmg
+
+      # --- CREATE RELEASE ---
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            InstallerOutput/Kenniskrabber_Windows_Setup.exe
+            Kenniskrabber-macOS.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

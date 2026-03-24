@@ -6,7 +6,7 @@ subprocess.run([
     "main.py",
     "--name", "Kenniskrabber",
     "--onedir",
-    #"--windowed",
+    "--windowed",
     "--add-data", "assets;assets",
     "--add-data", "README.md;.",
     "--hidden-import", "nicegui",
