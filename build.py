@@ -21,4 +21,5 @@ subprocess.run([
     "--hidden-import", "nicegui",
     "--collect-all", "nicegui",
     "--collect-all", "markdownify",
+    "--collect-all", "selenium"
 ], check=True)
