@@ -17,7 +17,7 @@ from markdownify import markdownify as md
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.common.exceptions import TimeoutException, ElementNotInteractableException, StaleElementReferenceException
+from selenium.common.exceptions import WebDriverException, TimeoutException, ElementNotInteractableException, StaleElementReferenceException
 from selenium.webdriver.support.wait import WebDriverWait
 
 from nicegui import ui, run
@@ -28,23 +28,16 @@ else:
     base_path = os.path.abspath(os.path.dirname(__file__))
 
 def get_default_output_dir(input_file=False):
-    """Gets the folder where the app is running and creates a default 'scrapes' path."""
-    # Check if we are running as a PyInstaller compiled executable
-    if getattr(sys, 'frozen', False):
-        base_dir = os.path.dirname(sys.executable)
-    else:
-        # Running as a normal Python script
-        base_dir = os.path.abspath(os.path.dirname(__file__))
+    """Gets a safe user directory to save scrapes cross-platform."""
+    user_home = os.path.expanduser("~")
+    base_dir = os.path.join(user_home, "Documents", "Kenniskrabber")
+    os.makedirs(base_dir, exist_ok=True)
 
     if input_file:
         return os.path.join(base_dir, "query_file.csv")
 
-    # Create a default folder name (e.g., /scrapes/2026-03-04_17-30)
-    # Adding a timestamp ensures they don't overwrite old scrapes by accident!
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
     default_path = os.path.join(base_dir, "scrapes", f"scrape_{timestamp}")
-
-    # Make sure the base 'scrapes' directory actually exists
     os.makedirs(default_path, exist_ok=True)
 
     return default_path
@@ -122,7 +115,15 @@ class GoogleAIScraper:
             shutil.copytree(custom_profile, temp_profile, dirs_exist_ok=True)
             options.add_argument(f'--profile={temp_profile}')
 
-        driver = webdriver.Firefox(options=options)
+        try:
+            driver = webdriver.Firefox(options=options)
+        except WebDriverException as e:
+            error_msg = str(e).lower()
+            if "binary location" in error_msg or "not found" in error_msg or "firefox" in error_msg:
+                raise Exception("Firefox could not be found or downloaded. Please install Mozilla Firefox to run this scraper.")
+            else:
+                raise Exception(f"Failed to start browser: {str(e)}")
+
         time.sleep(1)
         driver.set_page_load_timeout(60)
         driver.set_script_timeout(120)
@@ -189,8 +190,9 @@ class GoogleAIScraper:
             self.driver.get(f"{self.base_url}search?q=is scraping legal")
             self.check_for_captcha()
 
-            if not os.path.isfile("search_cookies.pkl"):
-                with open("search_cookies.pkl", "wb") as out_cookies:
+            cookie_path = os.path.join(os.path.expanduser("~"), "Documents", "Kenniskrabber", "search_cookies.pkl")
+            if not os.path.isfile(cookie_path):
+                with open(cookie_path, "wb") as out_cookies:
                     pickle.dump(self.driver.get_cookies(), out_cookies)
                     self.log("Saved cookies")
 
@@ -219,8 +221,10 @@ class GoogleAIScraper:
 
         except Exception as e:
             self.log(f"ERROR: {str(e)}", classes="text-red")
-            import traceback
-            self.log(traceback.format_exc())
+            if "Please install Mozilla Firefox" not in str(e):
+                import traceback
+                self.log(traceback.format_exc())
+
             return False
 
     def process(self):
@@ -378,6 +382,7 @@ class GoogleAIScraper:
                 else:
                     if show_more_button:
                         try:
+                            self.wait.until(lambda _: show_more_button and show_more_button[0].is_displayed())
                             show_more_button[0].click()
                         except (StaleElementReferenceException, ElementNotInteractableException):
                             self.log("Could not find the 'Show more' button anymore, continuing", classes="text-orange")
@@ -401,7 +406,6 @@ class GoogleAIScraper:
                     # Get sources
                     urls = []
                     url_divs = []
-                    carousel_divs = []
                     show_more_urls_button = ai_overview.find_elements(by=By.CSS_SELECTOR,
                                                                       value=sel["ao_show_more_urls"])
                     # If there's 3 sources or a horizontal scroller, you can't expand
@@ -734,7 +738,7 @@ class GUI:
                         "ao_url_divs_carousel": ("Sources (carousel)", "List items for sources at the bottom of an AI Overview, horizontally ordered"),
                         "ao_url_title": ("Source title", "Element within the source box that contains the source title"),
                         "ao_url_description": ("Source description", "Element within the source box with the source description text"),
-                        "ao_url_description_fallback": ("Source desc. fallback", "Fallback element for source description"),
+                        "ao_url_description_fallback": ("Source description (fallback)", "Fallback element for source description"),
                     }
                     AM_SELECTOR_META = {
                         "am_answers_container": ("Container", "Main AI Mode answers container element"),
