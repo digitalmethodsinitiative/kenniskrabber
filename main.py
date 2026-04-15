@@ -602,6 +602,18 @@ class GoogleAIScraper:
             except:
                 pass
 
+    def restart_driver(self):
+        """Quit the current browser and start a fresh one, preserving the wait object."""
+        self.log("Restarting browser...", classes="text-orange")
+        try:
+            if self.driver:
+                self.driver.quit()
+        except Exception:
+            pass
+        self.driver = self.get_driver(custom_profile=self.profile)
+        self.wait = WebDriverWait(self.driver, timeout=2)
+        self.log("Browser restarted.", classes="text-orange")
+
     def open_page(self, url):
         retries = 0
         max_retries = 3
@@ -614,9 +626,20 @@ class GoogleAIScraper:
                 retries += 1
                 self.log(f"Page timed out, trying again in 10 seconds (retry {retries}/{max_retries})...", classes="text-orange")
                 time.sleep(10)
-                self.driver.refresh()
+                try:
+                    self.driver.refresh()
+                except WebDriverException:
+                    self.log("Browser unresponsive after timeout, restarting...", classes="text-orange")
+                    self.restart_driver()
+            except WebDriverException as e:
+                if "marionette" in str(e).lower() or "decode" in str(e).lower():
+                    retries += 1
+                    self.log(f"Marionette connection lost, restarting browser (retry {retries}/{max_retries})...", classes="text-orange")
+                    self.restart_driver()
+                else:
+                    raise
         if retries > max_retries:
-            raise Exception("Couldn't load page after 10 retries")
+            raise Exception("Couldn't load page after max retries")
 
     def check_for_captcha(self):
         captcha = self.driver.find_elements(By.CSS_SELECTOR, "#recaptcha")
