@@ -11,6 +11,7 @@ import pickle
 import pandas as pd
 import tempfile
 import shutil
+import requests
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 from markdownify import markdownify as md
@@ -70,7 +71,7 @@ class GoogleAIScraper:
 
     def __init__(self, scrape_mode="both", base_url=None, profile="", iterate_queries=set(),
                  inserted_queries=None, query_file=None, results_file="", output_dir="", offset=0,
-                 shuffle_queries=False, throttled_strings=None,
+                 shuffle_queries=False, scrape_sources=False, throttled_strings=None,
                  ao_selectors=None, am_selectors=None,
                  progress_callback=None, log_callback=None):
         self.scrape_mode = scrape_mode
@@ -83,6 +84,7 @@ class GoogleAIScraper:
         self.results_file = results_file
         self.output_dir = output_dir
         self.shuffle_queries = shuffle_queries
+        self.scrape_sources = scrape_sources
         self.offset = offset
         self.throttled_strings = [t_s.strip() for t_s in throttled_strings.split(",")] if throttled_strings else [
             "Try again later", "Something went wrong"]
@@ -95,6 +97,7 @@ class GoogleAIScraper:
 
         self.finished_ai_overview_queries = set()
         self.finished_ai_mode_queries = set()
+        self.source_urls_to_scrape = set() # Queue for Phase 2
         self.scrape_durations = deque(maxlen=20)
 
     def log(self, msg, classes=None):
@@ -115,47 +118,63 @@ class GoogleAIScraper:
             shutil.copytree(custom_profile, temp_profile, dirs_exist_ok=True)
             options.add_argument(f'--profile={temp_profile}')
 
-        try:
-            driver = webdriver.Firefox(options=options)
-        except WebDriverException as e:
-            error_msg = str(e).lower()
-            if "binary location" in error_msg or "not found" in error_msg or "firefox" in error_msg:
-                raise Exception("Firefox could not be found or downloaded. Please install Mozilla Firefox to run this scraper.")
-            else:
-                raise Exception(f"Failed to start browser: {str(e)}")
+        driver = None
+        max_retries = 3
+
+        for attempt in range(max_retries):
+            try:
+                driver = webdriver.Firefox(options=options)
+                break  # Success, exit the retry loop
+
+            except WebDriverException as e:
+                error_msg = str(e).lower()
+
+                # Catch the specific background update exit
+                if "process unexpectedly closed with status 0" in error_msg:
+                    if attempt < max_retries - 1:
+                        wait_time = 10 * (attempt + 1) # Progressive backoff: 10s, 20s...
+                        self.log(f"Firefox appears to be installing an update. Waiting {wait_time}s to retry (Attempt {attempt + 1}/{max_retries})...", classes="text-orange")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        raise Exception("Firefox update took too long. Please open Firefox manually to let it update, then try again.")
+
+                # Catch standard missing binary errors
+                elif "binary location" in error_msg or "not found" in error_msg or "firefox" in error_msg:
+                    raise Exception("Firefox could not be found. Please install Mozilla Firefox to run this scraper.")
+
+                # Catch anything else
+                else:
+                    raise Exception(f"Failed to start browser: {str(e)}")
 
         time.sleep(1)
         driver.set_page_load_timeout(60)
         driver.set_script_timeout(120)
         driver.implicitly_wait(.1)
 
+        self.install_cookie_blocker()
+
         if os.path.exists("stealthify.js"):
             driver.execute_script(open("stealthify.js").read())
+
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
         return driver
 
     def prepare(self):
-
         # Get queries
         n_urls = 0
         self.log("Getting queries")
         self.iterate_queries = set()
         if self.query_file and os.path.isfile(self.query_file):
-
             with open(self.query_file, "r", encoding="utf-8") as in_csv:
                 reader = csv.DictReader(in_csv)
-
                 for row in reader:
                     n_urls += 1
                     if self.offset and n_urls < self.offset:
                         continue
-
-                    # Get query from csv
-                    # Fallback to first column if 'query' header is missing
                     query = row.get("query", list(row.values())[0])
                     query_id = row.get("id", hashlib.md5(query.encode()).hexdigest())
-
                     self.iterate_queries.add((query_id, query))
 
         elif self.inserted_queries:
@@ -166,13 +185,12 @@ class GoogleAIScraper:
                 query = line.strip()
                 if not query:
                     continue
-
                 query_id = hashlib.md5(query.encode()).hexdigest()
                 self.iterate_queries.add((query_id, query))
 
         if not self.iterate_queries:
             self.log("No queries found. Please add search queries in the text box or as a csv and try again.", classes="text-red")
-            return
+            return False
         else:
             self.log(f"Found {len(self.iterate_queries)} unique queries to scrape.", classes="text-blue")
 
@@ -211,11 +229,11 @@ class GoogleAIScraper:
                                 self.finished_ai_mode_queries.add(finished_query["id"])
                         except Exception as parse_err:
                             self.log(f"Warning: could not parse results line: {parse_err}", classes="text-orange")
-                self.log(
-                    f"Already collected {len(self.finished_ai_overview_queries)} AI Overviews and {len(self.finished_ai_mode_queries)} AI Modes", classes="text-orange")
+                self.log(f"Already collected {len(self.finished_ai_overview_queries)} AI Overviews and {len(self.finished_ai_mode_queries)} AI Modes", classes="text-orange")
 
-            self.log(
-                "Browser ready.", classes="text-blue")
+            self.install_cookie_blocker()
+
+            self.log("Browser ready.", classes="text-blue")
             self.log("Please complete any CAPTCHAs or logins in the Firefox window, then press '2. Start Scraping'.", classes="text-orange")
             return True
 
@@ -224,7 +242,6 @@ class GoogleAIScraper:
             if "Please install Mozilla Firefox" not in str(e):
                 import traceback
                 self.log(traceback.format_exc())
-
             return False
 
     def process(self):
@@ -261,7 +278,7 @@ class GoogleAIScraper:
                                 out_file.write(json.dumps(result) + "\n")
 
                         self.save_html(query, page_id, mode)
-                        self.save_screenshot(query, page_id, mode)
+                        self.save_screenshot(query=query, page_id=page_id, mode=mode)
                         self.finished_ai_overview_queries.add(page_id)
                         self.print_elapsed_time(start, len(self.iterate_queries), count)
                     else:
@@ -275,7 +292,6 @@ class GoogleAIScraper:
                         query_url = f"{self.base_url}search?udm=50&q={self.get_url_string(query)}"
                         self.open_page(query_url)
 
-                        # Replace this with your actual parse_ai_mode call
                         result = self.parse_ai_mode(page_id, query)
 
                         if result:
@@ -284,12 +300,13 @@ class GoogleAIScraper:
                                 out_file.write(json.dumps(result) + "\n")
 
                         self.save_html(query, page_id, mode)
-                        self.save_screenshot(query, page_id, mode)
+                        self.save_screenshot(query=query, page_id=page_id, mode=mode)
                         self.finished_ai_mode_queries.add(page_id)
                         self.print_elapsed_time(start, len(self.iterate_queries), count)
                     else:
                         self.log("Already scraped AI Mode data, skipping", classes="text-orange")
 
+            # JSON to CSV Conversion
             if self.is_running and self.results_file:
                 self.log("Converting results JSON to csv")
                 csv_filename = self.results_file[:-5] + ".csv"
@@ -308,7 +325,12 @@ class GoogleAIScraper:
                             csv_line["sources"] = self.source_to_string(csv_line["sources"]) if csv_line["sources"] else ""
                             writer.writerow(csv_line)
 
-                self.log("Done! Scraping completed successfully.", classes="text-blue")
+                self.log("Google scraping completed.", classes="text-blue")
+
+                # Scrape source links if selected
+                if self.scrape_sources and self.source_urls_to_scrape:
+                    self.process_sources()
+
             else:
                 self.log("No AI output found...", classes="text-red")
         except Exception as e:
@@ -320,6 +342,32 @@ class GoogleAIScraper:
             self.stop()
 
 
+    def process_sources(self):
+        """ Worker to iterate through extracted source URLs."""
+        self.log(f"Scraping {len(self.source_urls_to_scrape)} linked source pages.", classes="text-blue")
+
+        for i, url in enumerate(list(self.source_urls_to_scrape)):
+            if not self.is_running:
+                break
+
+            self.log(f"Scraping source {i+1}/{len(self.source_urls_to_scrape)}: {url}")
+            try:
+                self.driver.get(url)
+
+                # Check for generic Cloudflare/hCaptcha blocks
+                self.check_for_generic_captcha()
+
+                # Give I Don't Care About Cookies 3 seconds
+                time.sleep(3)
+
+                self.save_screenshot(output_dir="/screenshots_sources")
+                self.save_html(output_dir="/html_sources")
+
+            except TimeoutException:
+                self.log(f"Timeout loading {url}, skipping.", classes="text-orange")
+            except Exception as e:
+                self.log(f"Error scraping {url}: {e}", classes="text-red")
+
     def parse_ai_overview(self, page_id, query) -> dict:
         time.sleep(1)
         sel = self.ao_selectors
@@ -328,7 +376,6 @@ class GoogleAIScraper:
             if ai_overview and ai_overview[0].is_displayed():
                 ai_overview = ai_overview[0]
 
-                # Wait for as long as the 'generating' animations are there.
                 generating_waits = 0
                 while generating_waits < 10:
                     if not ai_overview.is_enabled():
@@ -390,25 +437,20 @@ class GoogleAIScraper:
                     ai_overview_inner = None
                     retry_ai_overview_count = 0
                     while not ai_overview_inner:
-                        ai_overview_inner = ai_overview.find_elements(by=By.CSS_SELECTOR,
-                                                                     value=sel["ao_inner_text"])
-
+                        ai_overview_inner = ai_overview.find_elements(by=By.CSS_SELECTOR, value=sel["ao_inner_text"])
                         retry_ai_overview_count += 1
                         if retry_ai_overview_count > 5:
                             self.log("AI Overview hidden or not found, skipping...", classes="text-orange")
                             return {}
 
                     ai_overview_inner = ai_overview_inner[0].get_attribute("outerHTML")
-
                     ai_overview_contents_md = md(ai_overview_inner, strip=["a", "img", "button", "span[id]"])
                     ai_overview_data["text"] = ai_overview_contents_md
 
-                    # Get sources
                     urls = []
                     url_divs = []
-                    show_more_urls_button = ai_overview.find_elements(by=By.CSS_SELECTOR,
-                                                                      value=sel["ao_show_more_urls"])
-                    # If there's 3 sources or a horizontal scroller, you can't expand
+                    show_more_urls_button = ai_overview.find_elements(by=By.CSS_SELECTOR, value=sel["ao_show_more_urls"])
+
                     if show_more_urls_button:
                         for show_more_url_button in show_more_urls_button:
                             try:
@@ -420,21 +462,15 @@ class GoogleAIScraper:
                                     except ElementNotInteractableException:
                                         self.log("ERROR: Could not expand URL box, continuing anyway", classes="text-orange")
                             except TimeoutException:
-                                # Sometimes the button never shows up
-                                url_divs = self.driver.find_elements(by=By.CSS_SELECTOR,
-                                                             value=sel["ao_url_divs_not_expandable"])
+                                url_divs = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_divs_not_expandable"])
                                 self.log("ERROR: Could not expand URL box, continuing anyway", classes="text-orange")
 
                     else:
-                        carousel_divs = ai_overview.find_elements(by=By.CSS_SELECTOR,
-                                                                          value=sel["ao_url_divs_carousel"])
-                        # Carousel of sources underneath AI Overview
+                        carousel_divs = ai_overview.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_divs_carousel"])
                         if carousel_divs:
                             url_divs = carousel_divs
-                        # Else it's a blue box with non-expandable sources
                         else:
-                            url_divs = self.driver.find_elements(by=By.CSS_SELECTOR,
-                                                             value=sel["ao_url_divs_not_expandable"])
+                            url_divs = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_divs_not_expandable"])
 
                     for url_div in url_divs:
                         if url_div.is_displayed():
@@ -452,6 +488,7 @@ class GoogleAIScraper:
                                 "url": url_div_url,
                             }
                             urls.append(url)
+                            self.source_urls_to_scrape.add(url_div_url) # Add to Phase 2 queue
 
                     ai_overview_data["sources"] = urls
 
@@ -461,7 +498,6 @@ class GoogleAIScraper:
 
     def parse_ai_mode(self, page_id, query) -> dict:
         time.sleep(4)
-
         sel = self.am_selectors
 
         while True:
@@ -476,8 +512,7 @@ class GoogleAIScraper:
                         retries += 1
                         self.log("AI Overview may not be done generating, waiting 2 secs...", classes="text-orange")
                         time.sleep(2)
-                        generated = True if ai_mode.find_elements(by=By.CSS_SELECTOR,
-                                                                  value=sel["am_processed_answer"]) else False
+                        generated = True if ai_mode.find_elements(by=By.CSS_SELECTOR, value=sel["am_processed_answer"]) else False
                         if generated:
                             break
 
@@ -507,8 +542,7 @@ class GoogleAIScraper:
                     self.check_for_captcha()
                     continue
 
-                show_more_urls_button = ai_mode.find_elements(by=By.CSS_SELECTOR,
-                                                              value=sel["am_show_more_urls"])
+                show_more_urls_button = ai_mode.find_elements(by=By.CSS_SELECTOR, value=sel["am_show_more_urls"])
                 if show_more_urls_button:
                     for show_more_url_button in show_more_urls_button:
                         try:
@@ -525,8 +559,7 @@ class GoogleAIScraper:
                 if not ai_mode_html:
                     time.sleep(6)
                     ai_mode.find_elements(by=By.CSS_SELECTOR, value=sel["am_answers"])
-                ai_mode_html = ai_mode_html[0]
-                ai_mode_html = ai_mode_html.get_attribute("outerHTML")
+                ai_mode_html = ai_mode_html[0].get_attribute("outerHTML")
 
                 ai_mode_contents_md = md(ai_mode_html, strip=["a", "img"])
                 ai_mode_data["text"] = ai_mode_contents_md.split("AI-reactions can")[0]
@@ -547,6 +580,7 @@ class GoogleAIScraper:
                         "url": url_div_url,
                     }
                     urls.append(url)
+                    self.source_urls_to_scrape.add(url_div_url) # Add to queue
 
                 ai_mode_data["sources"] = urls
                 ai_mode_data["not_available"] = False
@@ -554,43 +588,41 @@ class GoogleAIScraper:
 
         return ai_mode_data if ai_mode_data and ai_mode_data.get("text") else {}
 
-    def save_html(self, query, page_id, mode):
-        html_dir = self.output_dir + "/html"
+    def save_html(self, query=None, page_id=None, mode=None, output_dir="/html"):
+        html_dir = self.output_dir + output_dir
         if not os.path.isdir(html_dir):
             os.mkdir(html_dir)
 
-        filename_query = re.sub(r'[\\/*?:"<>|]', "", query)
-        filename_base = f"{page_id}_{mode}_{filename_query}"
-        filename = filename_base + ".html"
-        html_location = f"{html_dir}/{filename}"
+        filename = self.get_page_str(query=query, page_id=page_id, mode=mode, suffix=".html")
 
-        with open(html_location, "w", encoding="utf-8") as out_html:
+        with open(f"{html_dir}/{filename}", "w", encoding="utf-8") as out_html:
             out_html.write(self.driver.page_source)
 
-    def save_screenshot(self, query, page_id, mode):
-        screenshots_dir = self.output_dir + "/screenshots"
+    def save_screenshot(self, query=None, page_id=None, mode=None, output_dir="/screenshots"):
+        screenshots_dir = self.output_dir + output_dir
         if not os.path.isdir(screenshots_dir):
             os.mkdir(screenshots_dir)
 
-        filename_query = query
-        filename_query = re.sub(r'[\\/*?:"<>|]', "", filename_query)
-        filename_base = f"{page_id}_{mode}_{filename_query}"
-        filename = filename_base + ".png"
+        filename = self.get_page_str(query=query, page_id=page_id, mode=mode, suffix=".png")
+
         screenshot_location = f"{screenshots_dir}/{filename}"
 
-        if mode == "ai_overviews":
+        if mode == "ai_overview":
             window_height = self.driver.execute_script("return document.documentElement.scrollHeight")
             self.driver.set_window_size(1920, window_height)
-        else:
+        elif mode == "ai_mode":
             chat_box_height = self.driver.execute_script(f"return document.querySelector('div.WzWwpc').offsetHeight;")
             height_maximalized = 300 + int(chat_box_height)
             window_height = 1080 if height_maximalized < 1080 else height_maximalized
             self.driver.set_window_size(1920, window_height)
+        else:
+            self.driver.get_full_page_screenshot_as_file(screenshot_location)  # don't try to scroll to the end
+            self.driver.set_window_size(1920, 1080)
+            return
 
         self.driver.execute_script("window.scrollTo(0, 0);")
         self.driver.save_screenshot(screenshot_location)
         self.driver.set_window_size(1920, 1080)
-
 
     def stop(self):
         self.is_running = False
@@ -642,13 +674,69 @@ class GoogleAIScraper:
             raise Exception("Couldn't load page after max retries")
 
     def check_for_captcha(self):
+        """Checks for Google's specific reCAPTCHA container"""
         captcha = self.driver.find_elements(By.CSS_SELECTOR, "#recaptcha")
         if captcha and captcha[0].is_displayed():
-            self.log("CAPTCHA detected, please solve it in the Firefox window...", classes="text-orange")
+            self.log("Google CAPTCHA detected, please solve it in the Firefox window...", classes="text-orange")
+            print("\a") # Terminal bell alert
             while captcha and captcha[0].is_displayed():
                 time.sleep(2)
                 captcha = self.driver.find_elements(By.CSS_SELECTOR, "#recaptcha")
         return
+
+    def check_for_generic_captcha(self):
+        """Generic CAPTCHA checker for third party sources"""
+        # Look for Cloudflare, Datadome, or standard hCaptcha/reCAPTCHA iframes
+        captcha_selectors = [
+            "iframe[src*='challenges.cloudflare.com']",
+            "iframe[src*='hcaptcha.com']",
+            "iframe[src*='recaptcha']",
+            "iframe[src*='datadome.co']",
+            "#recaptcha"
+        ]
+
+        for selector in captcha_selectors:
+            elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+            if elements and elements[0].is_displayed():
+                self.log(f"CAPTCHA detected on source page, please solve it in the Firefox window...", classes="text-orange")
+                print("\a") # Terminal bell alert
+
+                # Wait until the iframe vanishes or user navigates away
+                while elements and elements[0].is_displayed():
+                    time.sleep(2)
+                    try:
+                        elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                    except (StaleElementReferenceException, WebDriverException):
+                        break # Elements resolved or page changed
+                self.log("Captcha resolved. Continuing...", classes="text-blue")
+                return
+
+    def get_current_url(self, safe=True) -> str:
+        """ Returns the current URL as a string"""
+        current_url = self.driver.current_url
+        if safe:
+            current_url = re.sub(r'[\\/*?:"<>|]', "_", current_url.replace("https://", "").replace("http://", ""))[:150]
+        return current_url
+
+    def install_cookie_blocker(self):
+        """ Install cookie blocker extension """
+        try:
+            extension_url = "https://addons.mozilla.org/firefox/downloads/file/4637154/istilldontcareaboutcookies-latest.xpi"
+            temp_xpi_path = os.path.join(tempfile.gettempdir(), "istilldontcare.xpi")
+
+            # Download the extension and explicitly write it to a file
+            response = requests.get(extension_url)
+            response.raise_for_status() # Make sure the download actually succeeded
+
+            with open(temp_xpi_path, 'wb') as f:
+                f.write(response.content)
+
+            # Install from the local file path
+            self.driver.install_addon(temp_xpi_path, temporary=True)
+            self.log(f"Installed 'I Still Don't Care About Cookies' extension", classes="text-blue")
+
+        except Exception as e:
+            self.log(f"Failed to install extension cookie blocker: {e}", classes="text-orange")
 
     def get_url_string(self, query: str) -> str:
         return query.lower().strip().replace(" ", "+")
@@ -663,13 +751,30 @@ class GoogleAIScraper:
         hours, minutes = divmod(total_minutes, 60)
         self.log(f"Processed in {duration:.2f}s (avg {avg_duration:.2f}s, {hours}h {minutes}m left")
 
+    def get_page_str(self, query=None, page_id=None, mode=None, suffix=None):
+        if query and page_id and mode:
+            filename_query = re.sub(r'[\\/*?:"<>|]', "", query)
+            filename = f"{page_id}_{mode}_{filename_query}"
+        elif page_id and mode:
+            filename = f"{page_id}_{mode}_{self.get_current_url(safe=True)}"
+        elif page_id:
+            filename = f"{page_id}_{self.get_current_url(safe=True)}"
+        else:
+            current_url = self.get_current_url(safe=True)
+            page_id = hashlib.md5(current_url.encode()).hexdigest()
+            filename = f"{page_id}_{current_url}"
+
+        if suffix:
+            filename += suffix
+        return filename
+
+
     @staticmethod
     def source_to_string(sources) -> str:
         source_string = []
         for source in sources:
             source_string.append(f"{source.get('title', '')}: {source.get('description', '')} - {source.get('url', '')}")
         return "\n".join(source_string) if source_string else ""
-
 
 # NICEGUI INTERFACE
 def load_readme() -> str:
@@ -687,7 +792,6 @@ class GUI:
         self.label_insert = 'Insert queries'
         self.setup_ui()
 
-
     def setup_ui(self):
         ui.colors(primary='#c1350c', secondary='#fbf1d0', accent='#1c5276', positive='#f5a30f')
         ui.add_head_html('''
@@ -701,7 +805,7 @@ class GUI:
         with ui.header().classes('bg-primary text-blue p-0 gap-0'):
             ui.image(os.path.join(base_path, 'assets', 'logo_cutout.png')).style('width: 75px; height: 75px; object-fit: cover; flex-shrink: 0;')
             with ui.row().classes('p-4 self-center items-baseline gap-3'):
-                ui.label('Kenniskrabber').classes('main-title');
+                ui.label('Kenniskrabber').classes('main-title')
                 ui.label('v0.5').classes('main-title version')
 
         with ui.row().classes('w-full p-4 gap-4 items-stretch'):
@@ -715,10 +819,8 @@ class GUI:
                         value='AI Overviews & AI Modes'
                     ).classes('w-full')
 
-                    self.input_method = ui.radio([self.label_insert, self.label_queryfile], value=self.label_insert).props(
-                        'inline')
+                    self.input_method = ui.radio([self.label_insert, self.label_queryfile], value=self.label_insert).props('inline')
 
-                    # Visibility is bound to the radio button state
                     default_query_file = get_default_output_dir(input_file=True)
                     self.file_input = ui.input('Query file csv location', value=default_query_file).classes('w-full') \
                         .bind_visibility_from(self.input_method, 'value', value=self.label_queryfile)
@@ -726,8 +828,12 @@ class GUI:
                     self.text_input = ui.textarea('Enter queries (one per line)',
                                                   placeholder="is scraping legal?\nmacy conference\nDSA audits") \
                         .classes('w-full').bind_visibility_from(self.input_method, 'value', value=self.label_insert)
+
                     self.shuffle = ui.checkbox('Shuffle queries')
 
+                    self.scrape_sources_cb = ui.checkbox('Scrape sources')
+                    with ui.icon('help_outline').classes('text-grey cursor-pointer'):
+                        ui.tooltip('Extracts HTML of all linked sources after collecting Google data. This also install the I Don\'t Care about Cookies extension.')
 
                     default_output_folder = get_default_output_dir()
                     self.output_dir = ui.input('Output directory', value=default_output_folder).classes('full-width')
@@ -736,8 +842,7 @@ class GUI:
                 with ui.card().classes('w-full'):
                     ui.label('Scrape settings').classes('card-title text-xl mb-2')
                     self.profile = ui.input('Firefox Profile Path (Optional)',
-                                            placeholder='C:/Users/User/AppData/Roaming/Mozilla/Firefox/Profiles/xxx.default').classes(
-                        'w-full')
+                                            placeholder='C:/Users/User/AppData/Roaming/Mozilla/Firefox/Profiles/xxx.default').classes('w-full')
 
                     with ui.row().classes('w-full gap-2'):
                         self.tld = ui.input('Top-level domain', value='.com').classes('flex-grow')
@@ -746,7 +851,7 @@ class GUI:
                     with ui.row().classes('w-full items-center gap-1'):
                         self.throttle_strings = ui.input('Throttled text', value='Something went wrong, Try again later').classes('flex-grow')
                         with ui.icon('help_outline').classes('text-grey cursor-pointer'):
-                            ui.tooltip('Comma-separated, case-sensitive texts that appear when Google throttles your AI Overview/Mode requests, in the language of your Google (e.g. "Something went wrong, Try again later")')
+                            ui.tooltip('Comma-separated texts that appear when Google throttles requests.')
 
                     # CSS Selectors accordion
                     AO_SELECTOR_META = {
@@ -755,13 +860,12 @@ class GUI:
                         "ao_failed_elements": ("Failed elements", "Elements indicating AI Overview failed to load"),
                         "ao_inner_text": ("Inner text", "Element containing the AI Overview inner text"),
                         "ao_show_more_urls": ("Show more URLs btn", "Button to expand the source URL list"),
-                        "ao_url_divs": ("Sources (expandable box)", "List items for sources after clicking the 'Show more' button"),
-                        "ao_url_divs_not_expandable": ("Sources (not expandable)", "List items for sources if there's no 'Show more"
-                                                                                             "  button."),
-                        "ao_url_divs_carousel": ("Sources (carousel)", "List items for sources at the bottom of an AI Overview, horizontally ordered"),
-                        "ao_url_title": ("Source title", "Element within the source box that contains the source title"),
-                        "ao_url_description": ("Source description", "Element within the source box with the source description text"),
-                        "ao_url_description_fallback": ("Source description (fallback)", "Fallback element for source description"),
+                        "ao_url_divs": ("Sources (expandable box)", "List items for sources after clicking 'Show more'"),
+                        "ao_url_divs_not_expandable": ("Sources (not expandable)", "List items for sources without 'Show more' button."),
+                        "ao_url_divs_carousel": ("Sources (carousel)", "List items for sources at bottom, horizontally ordered"),
+                        "ao_url_title": ("Source title", "Element containing the source title"),
+                        "ao_url_description": ("Source description", "Element with the source description text"),
+                        "ao_url_description_fallback": ("Source description (fallback)", "Fallback element for description"),
                     }
                     AM_SELECTOR_META = {
                         "am_answers_container": ("Container", "Main AI Mode answers container element"),
@@ -773,15 +877,11 @@ class GUI:
                     }
 
                     with ui.expansion('CSS Selectors').classes('w-full'):
-                        self.selector_toggle = ui.toggle(
-                            ['AI Overview', 'AI Mode'], value='AI Overview'
-                        ).classes('w-full mb-2').props('spread no-wrap')
+                        self.selector_toggle = ui.toggle(['AI Overview', 'AI Mode'], value='AI Overview').classes('w-full mb-2').props('spread no-wrap')
 
-                        # AI Overview selectors panel
                         self.ao_selector_inputs = {}
                         ao_defaults = GoogleAIScraper.DEFAULT_AO_SELECTORS
-                        with ui.column().classes('w-full gap-1').bind_visibility_from(
-                                self.selector_toggle, 'value', value='AI Overview') as self.ao_panel:
+                        with ui.column().classes('w-full gap-1').bind_visibility_from(self.selector_toggle, 'value', value='AI Overview'):
                             for key, (label, tooltip) in AO_SELECTOR_META.items():
                                 with ui.row().classes('w-full items-center gap-1'):
                                     inp = ui.input(label, value=ao_defaults[key]).classes('flex-grow').props('dense')
@@ -789,39 +889,33 @@ class GUI:
                                         ui.tooltip(tooltip)
                                     self.ao_selector_inputs[key] = inp
 
-                        # AI Mode selectors panel
                         self.am_selector_inputs = {}
                         am_defaults = GoogleAIScraper.DEFAULT_AM_SELECTORS
-                        with ui.column().classes('w-full gap-1').bind_visibility_from(
-                                self.selector_toggle, 'value', value='AI Mode') as self.am_panel:
+                        with ui.column().classes('w-full gap-1').bind_visibility_from(self.selector_toggle, 'value', value='AI Mode'):
                             for key, (label, tooltip) in AM_SELECTOR_META.items():
                                 with ui.row().classes('w-full items-center gap-1'):
                                     inp = ui.input(label, value=am_defaults[key]).classes('flex-grow').props('dense')
                                     with ui.icon('help_outline').classes('text-grey cursor-pointer'):
                                         ui.tooltip(tooltip)
                                     self.am_selector_inputs[key] = inp
+
             # LOGS AND ACTIONS
             with ui.column().classes('w-1/2 min-w-[400px] flex-grow'):
                 with ui.card().classes('w-full'):
                     ui.label('Run').classes('card-title text-xl mb-2')
                     with ui.row().classes('w-full gap-2'):
-                        self.btn_prepare = ui.button('1. Prepare Browser', on_click=self.on_prepare).classes(
-                            'flex-grow')
-                        self.btn_start = ui.button('2. Start Scraping', on_click=self.on_start).classes(
-                            'flex-grow')
+                        self.btn_prepare = ui.button('1. Prepare Browser', on_click=self.on_prepare).classes('flex-grow')
+                        self.btn_start = ui.button('2. Start Scraping', on_click=self.on_start).classes('flex-grow')
                         self.btn_start.disable()
-                        self.btn_stop = ui.button('Stop', color='red', on_click=self.on_stop).classes(
-                            'flex-grow')
+                        self.btn_stop = ui.button('Stop', color='red', on_click=self.on_stop).classes('flex-grow')
                         self.btn_stop.disable()
 
                 with ui.card().classes('w-full h-96 flex-grow'):
                     ui.label('Status').classes('card-title text-xl')
-
                     self.progress_label = ui.label('Progress: 0/0')
                     self.progress_bar = ui.linear_progress(value=0, show_value=False).classes('w-full mb-4')
 
-                    self.btn_open_folder = ui.button('Open output folder', color='red', on_click=self.open_output_folder) \
-                        .classes('w-full flex-grow')
+                    self.btn_open_folder = ui.button('Open output folder', color='red', on_click=self.open_output_folder).classes('w-full flex-grow')
                     self.btn_open_folder.set_visibility(False)
 
                     self.log_scroll = ui.scroll_area().classes('w-full h-full rounded')
@@ -836,7 +930,6 @@ class GUI:
         self.progress_bar.set_value(current / total if total > 0 else 0)
 
     def log_push(self, msg, classes=None):
-        """Push a styled line into the log scroll area."""
         base = 'text-sm font-mono w-full break-words'
         extra = f' {classes}' if classes else ''
         with self.log_column:
@@ -851,7 +944,6 @@ class GUI:
         self.btn_open_folder.set_visibility(False)
         self.btn_prepare.disable()
 
-        # Handle the temporary query file if user used text area
         query_file = self.file_input.value
         if self.input_method.value == 'Insert queries':
             temp_file = os.path.join(self.output_dir.value or './', 'queries.csv')
@@ -865,7 +957,6 @@ class GUI:
                     writer.writerow([q])
             query_file = temp_file
 
-        # Handle shuffling logic
         if self.shuffle.value and os.path.isfile(query_file):
             shuffled_filename = query_file[:-4] + "_shuffled.csv"
             self.log_push(f"Shuffling rows to {shuffled_filename}")
@@ -887,14 +978,14 @@ class GUI:
             inserted_queries=self.text_input.value if self.input_method.value == self.label_insert else None,
             query_file=query_file if self.input_method.value == self.label_queryfile else None,
             offset=int(self.offset.value),
+            scrape_sources=self.scrape_sources_cb.value,
             throttled_strings=self.throttle_strings.value,
             ao_selectors={k: inp.value for k, inp in self.ao_selector_inputs.items()},
             am_selectors={k: inp.value for k, inp in self.am_selector_inputs.items()},
             progress_callback=self.update_progress,
-            log_callback=self.log_push  # Send all scraper prints straight to the GUI
+            log_callback=self.log_push
         )
 
-        # Run prepare in a background thread so the UI doesn't freeze!
         success = await run.io_bound(self.scraper.prepare)
 
         if success:
@@ -906,7 +997,6 @@ class GUI:
         self.btn_start.disable()
         self.btn_stop.enable()
 
-        # Run process in a background thread
         await run.io_bound(self.scraper.process)
 
         self.btn_prepare.enable()
