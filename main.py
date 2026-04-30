@@ -50,11 +50,14 @@ class GoogleAIScraper:
         "ao_show_more": "div.Jzkafd[role='button']",
         "ao_failed_elements": ".YWpX0d[style='']",
         "ao_inner_text": "div[jsname][data-rl] > div:not([id]) div[data-container-id='main-col']",
+        "ao_source_badge": "button[tabindex].pjvauc",
+        "ao_claim": ".Lem6n",
+        "ao_claim_url": "li.sEA2wc > div[data-src-id][data-crb-el]",
         "ao_show_more_urls": "#rw0ISc",
         "ao_url_divs": "li.CyMdWb > div",
         "ao_url_divs_not_expandable": "ul > li[data-processed] > div[data-src-id]",
         "ao_url_divs_carousel": "div[role='listitem'] > div[data-src-id]",
-        "ao_url_title": "div[id]",
+        "ao_url_title": "div[id] > span",
         "ao_url_description": "span[data-crb-snippet-text]",
         "ao_url_description_fallback": ".dMCttd",
     }
@@ -71,7 +74,7 @@ class GoogleAIScraper:
 
     def __init__(self, scrape_mode="both", base_url=None, profile="", iterate_queries=set(),
                  inserted_queries=None, query_file=None, results_file="", output_dir="", offset=0,
-                 shuffle_queries=False, scrape_sources=False, throttled_strings=None,
+                 shuffle_queries=False, scrape_claims=False, scrape_sources=False, throttled_strings=None,
                  ao_selectors=None, am_selectors=None,
                  progress_callback=None, log_callback=None):
         self.scrape_mode = scrape_mode
@@ -84,6 +87,7 @@ class GoogleAIScraper:
         self.results_file = results_file
         self.output_dir = output_dir
         self.shuffle_queries = shuffle_queries
+        self.scrape_claims = scrape_claims
         self.scrape_sources = scrape_sources
         self.offset = offset
         self.throttled_strings = [t_s.strip() for t_s in throttled_strings.split(",")] if throttled_strings else [
@@ -97,7 +101,7 @@ class GoogleAIScraper:
 
         self.finished_ai_overview_queries = set()
         self.finished_ai_mode_queries = set()
-        self.source_urls_to_scrape = set() # Queue for Phase 2
+        self.source_urls_to_scrape = set()
         self.scrape_durations = deque(maxlen=20)
 
     def log(self, msg, classes=None):
@@ -315,13 +319,16 @@ class GoogleAIScraper:
                     self.log("Results CSV already exists, appending")
                 with open(self.results_file, "r", encoding="utf-8") as in_json:
                     with open(csv_filename, write_mode, encoding="utf-8", newline="") as out_csv:
-                        first_line = True if write_mode == "w" else False
+                        write_header = True if write_mode == "w" else False
+                        writer = None # Pre-define writer
                         for line in in_json.readlines():
                             csv_line = json.loads(line)
-                            if first_line:
+
+                            if writer is None:
                                 writer = csv.DictWriter(out_csv, fieldnames=csv_line.keys())
-                                writer.writeheader()
-                                first_line = False
+                                if write_header:
+                                    writer.writeheader()
+
                             csv_line["sources"] = self.source_to_string(csv_line["sources"]) if csv_line["sources"] else ""
                             writer.writerow(csv_line)
 
@@ -443,10 +450,16 @@ class GoogleAIScraper:
                             self.log("AI Overview hidden or not found, skipping...", classes="text-orange")
                             return {}
 
-                    ai_overview_inner = ai_overview_inner[0].get_attribute("outerHTML")
-                    ai_overview_contents_md = md(ai_overview_inner, strip=["a", "img", "button", "span[id]"])
+                    # Get text
+                    ai_overview_outer = ai_overview_inner[0].get_attribute("outerHTML")
+                    ai_overview_contents_md = md(ai_overview_outer, strip=["a", "img", "button", "span[id]"])
                     ai_overview_data["text"] = ai_overview_contents_md
 
+                    # Get claims
+                    if self.scrape_claims:
+                        ai_overview_data["claims"] = self.get_ai_overview_claims(ai_overview_inner[0])
+
+                    # Get URLs
                     urls = []
                     url_divs = []
                     show_more_urls_button = ai_overview.find_elements(by=By.CSS_SELECTOR, value=sel["ao_show_more_urls"])
@@ -488,7 +501,7 @@ class GoogleAIScraper:
                                 "url": url_div_url,
                             }
                             urls.append(url)
-                            self.source_urls_to_scrape.add(url_div_url) # Add to Phase 2 queue
+                            self.source_urls_to_scrape.add(url_div_url) # Add to queue
 
                     ai_overview_data["sources"] = urls
 
@@ -587,6 +600,51 @@ class GoogleAIScraper:
                 break
 
         return ai_mode_data if ai_mode_data and ai_mode_data.get("text") else {}
+
+
+    def get_ai_overview_claims(self, ai_text_inner) -> list:
+        """
+        Get the claims from an AI Overview.
+        This clicks every link badge to extract the claim and sources.
+        """
+
+        claims = []
+        for link_badge in ai_text_inner.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_source_badge"]):
+
+            if link_badge.is_displayed():
+
+                link_badge.click()
+
+                claim_text = ai_text_inner.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_claim"])
+                if not claim_text:
+                    continue
+
+                claim_text = claim_text[0].get_attribute("innerHTML")
+                claim_text = md(claim_text, strip=["a", "img"])
+
+                claim_sources = []
+                for source_box in self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_claim_url"]):
+                    if source_box.is_displayed():
+                        claim_source = {}
+                        claim_source["title"] = source_box.find_element(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_title"]).get_attribute("innerHTML")
+                        claim_url = source_box.find_element(by=By.CSS_SELECTOR, value="a").get_attribute("href")
+                        claim_source["url_id"] = hashlib.md5(claim_url.encode()).hexdigest()
+                        claim_source["url"] = claim_url
+                        claim_source["domain"] = urlparse(claim_url).netloc
+                        claim_source["description"] = source_box.find_element(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_description"]).get_attribute("innerHTML")
+                        claim_sources.append(claim_source)
+
+                claim = {
+                    "claim": claim_text,
+                    "sources": claim_sources
+                }
+
+                claims.append(claim)
+
+            # Make sure old pop-ups disappear by clicking top search bar
+            self.driver.find_element(by=By.CSS_SELECTOR, value="textarea[id]").click()
+
+        return claims
 
     def save_html(self, query=None, page_id=None, mode=None, output_dir="/html"):
         html_dir = self.output_dir + output_dir
@@ -829,11 +887,20 @@ class GUI:
                                                   placeholder="is scraping legal?\nmacy conference\nDSA audits") \
                         .classes('w-full').bind_visibility_from(self.input_method, 'value', value=self.label_insert)
 
-                    self.shuffle = ui.checkbox('Shuffle queries')
+                    with ui.row().classes('items-center gap-1'):
+                        self.shuffle = ui.checkbox('Shuffle queries')
+                        with ui.icon('help_outline').classes('text-grey cursor-pointer'):
+                            ui.tooltip('Can be useful for longitudinal scrapes.')
 
-                    self.scrape_sources_cb = ui.checkbox('Scrape sources')
-                    with ui.icon('help_outline').classes('text-grey cursor-pointer'):
-                        ui.tooltip('Extracts HTML of all linked sources after collecting Google data. This also install the I Don\'t Care about Cookies extension.')
+                    with ui.row().classes('items-center gap-1'):
+                        self.scrape_claims = ui.checkbox('Extract claims', value=True)
+                        with ui.icon('help_outline').classes('text-grey cursor-pointer'):
+                            ui.tooltip('Extracts claims and their associated sources from AI answers.')
+
+                    with ui.row().classes('items-center gap-1'):
+                        self.scrape_sources_cb = ui.checkbox('Scrape sources')
+                        with ui.icon('help_outline').classes('text-grey cursor-pointer'):
+                            ui.tooltip('Extracts HTML and screenshots of all linked sources after collecting Google data.')
 
                     default_output_folder = get_default_output_dir()
                     self.output_dir = ui.input('Output directory', value=default_output_folder).classes('full-width')
@@ -859,9 +926,12 @@ class GUI:
                         "ao_show_more": ("Show more btn", "Button to expand the full AI Overview"),
                         "ao_failed_elements": ("Failed elements", "Elements indicating AI Overview failed to load"),
                         "ao_inner_text": ("Inner text", "Element containing the AI Overview inner text"),
+                        "ao_source_badge": ("Source badge", "Source badge within the AI Overview"),
+                        "ao_claim": ("Claims", "Selector for highlighted claims after clicking a source badge"),
+                        "ao_claim_url": ("Claim source", "Source box in pop-up that opens after clicking a source badge."),
                         "ao_show_more_urls": ("Show more URLs btn", "Button to expand the source URL list"),
                         "ao_url_divs": ("Sources (expandable box)", "List items for sources after clicking 'Show more'"),
-                        "ao_url_divs_not_expandable": ("Sources (not expandable)", "List items for sources without 'Show more' button."),
+                        "ao_url_divs_not_expandable": ("Sources (not expandable)", "List items for sources without 'Show more' button"),
                         "ao_url_divs_carousel": ("Sources (carousel)", "List items for sources at bottom, horizontally ordered"),
                         "ao_url_title": ("Source title", "Element containing the source title"),
                         "ao_url_description": ("Source description", "Element with the source description text"),
@@ -978,6 +1048,7 @@ class GUI:
             inserted_queries=self.text_input.value if self.input_method.value == self.label_insert else None,
             query_file=query_file if self.input_method.value == self.label_queryfile else None,
             offset=int(self.offset.value),
+            scrape_claims=self.scrape_claims.value,
             scrape_sources=self.scrape_sources_cb.value,
             throttled_strings=self.throttle_strings.value,
             ao_selectors={k: inp.value for k, inp in self.ao_selector_inputs.items()},
