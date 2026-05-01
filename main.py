@@ -18,6 +18,7 @@ from markdownify import markdownify as md
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import WebDriverException, TimeoutException, ElementNotInteractableException, StaleElementReferenceException
 from selenium.webdriver.support.wait import WebDriverWait
 
@@ -47,10 +48,11 @@ class GoogleAIScraper:
     # Default CSS selectors for AI Overview scraping
     DEFAULT_AO_SELECTORS = {
         "ao_container": "#eKIzJc",
-        "ao_show_more": "div.Jzkafd[role='button']",
+        "ao_show_more": "div[aria-controls='m-x-content']",
         "ao_failed_elements": ".YWpX0d[style='']",
         "ao_inner_text": "div[jsname][data-rl] > div:not([id]) div[data-container-id='main-col']",
-        "ao_source_badge": "button[tabindex].pjvauc",
+        "ao_prompt_input": "div[data-active='input-plate-active']",
+        "ao_source_badge": "span.uJ19be",
         "ao_claim": ".Lem6n",
         "ao_claim_url": "li.sEA2wc > div[data-src-id][data-crb-el]",
         "ao_show_more_urls": "#rw0ISc",
@@ -156,8 +158,6 @@ class GoogleAIScraper:
         driver.set_script_timeout(120)
         driver.implicitly_wait(.1)
 
-        self.install_cookie_blocker()
-
         if os.path.exists("stealthify.js"):
             driver.execute_script(open("stealthify.js").read())
 
@@ -177,6 +177,7 @@ class GoogleAIScraper:
                     n_urls += 1
                     if self.offset and n_urls < self.offset:
                         continue
+
                     query = row.get("query", list(row.values())[0])
                     query_id = row.get("id", hashlib.md5(query.encode()).hexdigest())
                     self.iterate_queries.add((query_id, query))
@@ -209,6 +210,8 @@ class GoogleAIScraper:
 
             self.results_file = os.path.join(self.output_dir, f"google_ai_results.json")
 
+            self.install_cookie_blocker()
+
             self.driver.get(f"{self.base_url}search?q=is scraping legal")
             self.check_for_captcha()
 
@@ -235,7 +238,6 @@ class GoogleAIScraper:
                             self.log(f"Warning: could not parse results line: {parse_err}", classes="text-orange")
                 self.log(f"Already collected {len(self.finished_ai_overview_queries)} AI Overviews and {len(self.finished_ai_mode_queries)} AI Modes", classes="text-orange")
 
-            self.install_cookie_blocker()
 
             self.log("Browser ready.", classes="text-blue")
             self.log("Please complete any CAPTCHAs or logins in the Firefox window, then press '2. Start Scraping'.", classes="text-orange")
@@ -388,10 +390,13 @@ class GoogleAIScraper:
                     if not ai_overview.is_enabled():
                         ai_overview = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_container"])
                     generating_div = ai_overview.find_elements(by=By.CSS_SELECTOR, value="#folsrch-ghost")
-                    if generating_div and generating_div[0].is_displayed():
-                        time.sleep(0.5)
-                        generating_waits += 1
-                        continue
+                    try:
+                        if generating_div and generating_div[0].is_displayed():
+                            time.sleep(0.5)
+                            generating_waits += 1
+                            continue
+                    except StaleElementReferenceException:
+                        break
                     break
                 else:
                     self.log("Warning: #folsrch-ghost never appeared, continuing anyway", classes="text-orange")
@@ -435,11 +440,20 @@ class GoogleAIScraper:
                         continue
                 else:
                     if show_more_button:
-                        try:
-                            self.wait.until(lambda _: show_more_button and show_more_button[0].is_displayed())
-                            show_more_button[0].click()
-                        except (StaleElementReferenceException, ElementNotInteractableException):
-                            self.log("Could not find the 'Show more' button anymore, continuing", classes="text-orange")
+                        for attempt in range(3):
+                            try:
+                                if show_more_button[0].is_displayed():
+                                    self.log("Clicked show more button")
+                                    show_more_button[0].click()
+                                    time.sleep(.5)
+                                    break
+                                else:
+                                    show_more_button = self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_show_more"])
+                            except (StaleElementReferenceException, ElementNotInteractableException):
+                                show_more_button = self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_show_more"])
+                                continue_notice = "trying again" if attempt < 2 else "skipping"
+                                self.log(f"Could not find the 'Show more' button, {continue_notice}",
+                                         classes="text-orange")
 
                     ai_overview_inner = None
                     retry_ai_overview_count = 0
@@ -449,15 +463,21 @@ class GoogleAIScraper:
                         if retry_ai_overview_count > 5:
                             self.log("AI Overview hidden or not found, skipping...", classes="text-orange")
                             return {}
+                        if not ai_overview_inner:
+                            time.sleep(0.5)
+
+                    # Remove prompt box
+                    prompt_input = self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_prompt_input"])
+                    if prompt_input:
+                        self.driver.execute_script("""
+                                    var element = arguments[0];
+                                    element.parentNode.removeChild(element);
+                                    """, prompt_input[0])
 
                     # Get text
                     ai_overview_outer = ai_overview_inner[0].get_attribute("outerHTML")
                     ai_overview_contents_md = md(ai_overview_outer, strip=["a", "img", "button", "span[id]"])
                     ai_overview_data["text"] = ai_overview_contents_md
-
-                    # Get claims
-                    if self.scrape_claims:
-                        ai_overview_data["claims"] = self.get_ai_overview_claims(ai_overview_inner[0])
 
                     # Get URLs
                     urls = []
@@ -467,16 +487,16 @@ class GoogleAIScraper:
                     if show_more_urls_button:
                         for show_more_url_button in show_more_urls_button:
                             try:
-                                self.wait.until(lambda _: show_more_url_button.is_displayed())
-                                if show_more_url_button.is_displayed():
-                                    try:
-                                        show_more_url_button.click()
-                                        url_divs = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_divs"])
-                                    except ElementNotInteractableException:
-                                        self.log("ERROR: Could not expand URL box, continuing anyway", classes="text-orange")
-                            except TimeoutException:
-                                url_divs = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_divs_not_expandable"])
-                                self.log("ERROR: Could not expand URL box, continuing anyway", classes="text-orange")
+                                self.wait.until(lambda d: any(
+                                    el.is_displayed() for el in
+                                    d.find_elements(By.CSS_SELECTOR, sel["ao_show_more_urls"])
+                                ))
+                                show_more_url_button.click()
+                                url_divs = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_divs"])
+                            except (TimeoutException, ElementNotInteractableException):
+                                url_divs = self.driver.find_elements(by=By.CSS_SELECTOR,
+                                                                     value=sel["ao_url_divs_not_expandable"])
+                                self.log("Warning: Could not expand URL box, continuing anyway", classes="text-orange")
 
                     else:
                         carousel_divs = ai_overview.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_divs_carousel"])
@@ -504,6 +524,10 @@ class GoogleAIScraper:
                             self.source_urls_to_scrape.add(url_div_url) # Add to queue
 
                     ai_overview_data["sources"] = urls
+
+                    # Get claims
+                    if self.scrape_claims:
+                        ai_overview_data["claims"] = self.get_ai_overview_claims(ai_overview_inner[0])
 
                 return ai_overview_data
             else:
@@ -575,7 +599,7 @@ class GoogleAIScraper:
                 ai_mode_html = ai_mode_html[0].get_attribute("outerHTML")
 
                 ai_mode_contents_md = md(ai_mode_html, strip=["a", "img"])
-                ai_mode_data["text"] = ai_mode_contents_md.split("AI-reactions can")[0]
+                ai_mode_data["text"] = ai_mode_contents_md.split("\nAI-reac")[0]
 
                 urls = []
                 url_divs = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["am_url_box"])
@@ -613,6 +637,7 @@ class GoogleAIScraper:
 
             if link_badge.is_displayed():
 
+                # Click the badge
                 link_badge.click()
 
                 claim_text = ai_text_inner.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_claim"])
@@ -641,8 +666,10 @@ class GoogleAIScraper:
 
                 claims.append(claim)
 
-            # Make sure old pop-ups disappear by clicking top search bar
-            self.driver.find_element(by=By.CSS_SELECTOR, value="textarea[id]").click()
+                # Make sure old pop-ups disappear by clicking top search bar
+                self.driver.execute_script("window.scrollTo(0, 0);")
+                time.sleep(.1)
+                ActionChains(self.driver).move_by_offset(1, 1).click().perform()
 
         return claims
 
@@ -679,18 +706,19 @@ class GoogleAIScraper:
             return
 
         self.driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(0.5)
         self.driver.save_screenshot(screenshot_location)
         self.driver.set_window_size(1920, 1080)
 
     def stop(self):
         self.is_running = False
-        if self.driver:
-            try:
-                self.driver.quit()
-                self.log("Firefox browser closed.", classes="text-blue")
-                self.driver = None
-            except:
-                pass
+        # if self.driver:
+        #     try:
+        #         self.driver.quit()
+        #         self.log("Firefox browser closed.", classes="text-blue")
+        #         self.driver = None
+        #     except:
+        #         pass
 
     def restart_driver(self):
         """Quit the current browser and start a fresh one, preserving the wait object."""
@@ -736,7 +764,7 @@ class GoogleAIScraper:
         captcha = self.driver.find_elements(By.CSS_SELECTOR, "#recaptcha")
         if captcha and captcha[0].is_displayed():
             self.log("Google CAPTCHA detected, please solve it in the Firefox window...", classes="text-orange")
-            print("\a") # Terminal bell alert
+
             while captcha and captcha[0].is_displayed():
                 time.sleep(2)
                 captcha = self.driver.find_elements(By.CSS_SELECTOR, "#recaptcha")
@@ -757,7 +785,6 @@ class GoogleAIScraper:
             elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
             if elements and elements[0].is_displayed():
                 self.log(f"CAPTCHA detected on source page, please solve it in the Firefox window...", classes="text-orange")
-                print("\a") # Terminal bell alert
 
                 # Wait until the iframe vanishes or user navigates away
                 while elements and elements[0].is_displayed():
@@ -923,13 +950,13 @@ class GUI:
                     # CSS Selectors accordion
                     AO_SELECTOR_META = {
                         "ao_container": ("Container", "Main AI Overview container element"),
-                        "ao_show_more": ("Show more btn", "Button to expand the full AI Overview"),
+                        "ao_show_more": ("Show more button", "Button to expand the full AI Overview"),
                         "ao_failed_elements": ("Failed elements", "Elements indicating AI Overview failed to load"),
                         "ao_inner_text": ("Inner text", "Element containing the AI Overview inner text"),
                         "ao_source_badge": ("Source badge", "Source badge within the AI Overview"),
                         "ao_claim": ("Claims", "Selector for highlighted claims after clicking a source badge"),
-                        "ao_claim_url": ("Claim source", "Source box in pop-up that opens after clicking a source badge."),
-                        "ao_show_more_urls": ("Show more URLs btn", "Button to expand the source URL list"),
+                        "ao_claim_url": ("Claim source box", "Source box in pop-up that opens after clicking a source badge."),
+                        "ao_show_more_urls": ("Show more URLs button", "Button to expand the source URL list"),
                         "ao_url_divs": ("Sources (expandable box)", "List items for sources after clicking 'Show more'"),
                         "ao_url_divs_not_expandable": ("Sources (not expandable)", "List items for sources without 'Show more' button"),
                         "ao_url_divs_carousel": ("Sources (carousel)", "List items for sources at bottom, horizontally ordered"),
