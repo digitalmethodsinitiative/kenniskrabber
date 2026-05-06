@@ -20,6 +20,7 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import WebDriverException, TimeoutException, ElementNotInteractableException, StaleElementReferenceException
+from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.wait import WebDriverWait
 
 from nicegui import ui, run
@@ -59,7 +60,7 @@ class GoogleAIScraper:
         "ao_url_divs": "li.CyMdWb > div",
         "ao_url_divs_not_expandable": "ul > li[data-processed] > div[data-src-id]",
         "ao_url_divs_carousel": "div[role='listitem'] > div[data-src-id]",
-        "ao_url_title": "div[id] > span",
+        "ao_url_title": "div[id]",
         "ao_url_description": "span[data-crb-snippet-text]",
         "ao_url_description_fallback": ".dMCttd",
     }
@@ -380,26 +381,26 @@ class GoogleAIScraper:
     def parse_ai_overview(self, page_id, query) -> dict:
         time.sleep(1)
         sel = self.ao_selectors
+
         while True:
             ai_overview = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_container"])
             if ai_overview and ai_overview[0].is_displayed():
                 ai_overview = ai_overview[0]
 
-                generating_waits = 0
-                while generating_waits < 10:
-                    if not ai_overview.is_enabled():
-                        ai_overview = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_container"])
-                    generating_div = ai_overview.find_elements(by=By.CSS_SELECTOR, value="#folsrch-ghost")
+                try:
+                    wait = WebDriverWait(self.driver, 3)
                     try:
-                        if generating_div and generating_div[0].is_displayed():
-                            time.sleep(0.5)
-                            generating_waits += 1
-                            continue
-                    except StaleElementReferenceException:
-                        break
-                    break
-                else:
-                    self.log("Warning: #folsrch-ghost never appeared, continuing anyway", classes="text-orange")
+                        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#folsrch-ghost")))
+                    except TimeoutException:
+                        pass
+
+                    # wait for generating div
+                    WebDriverWait(self.driver, 10).until(
+                        EC.invisibility_of_element_located((By.CSS_SELECTOR, "#folsrch-ghost"))
+                    )
+                except TimeoutException:
+                    self.log("Warning: #folsrch-ghost still present after timeout, continuing anyway",
+                             classes="text-orange")
 
                 ai_overview_data = {
                     "mode": "ai_overview",
@@ -413,7 +414,6 @@ class GoogleAIScraper:
                     "sources": []
                 }
 
-                show_more_button = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_show_more"])
                 failed_elements = ai_overview.find_elements(by=By.CSS_SELECTOR, value=sel["ao_failed_elements"])
                 throttled = None
                 ai_overview_inner_text = ai_overview.find_elements(by=By.CSS_SELECTOR, value=sel["ao_inner_text"])
@@ -425,6 +425,7 @@ class GoogleAIScraper:
                             throttled = throttled_string
                             break
 
+                show_more_button = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_show_more"])
                 if not show_more_button and (failed_elements or throttled):
                     if failed_elements:
                         ai_overview_data["text"] = ai_overview.text
@@ -440,25 +441,13 @@ class GoogleAIScraper:
                         continue
                 else:
                     if show_more_button:
+                        time.sleep(.5)
+                        show_more_clicked = False
                         for attempt in range(3):
                             try:
-                                btn = show_more_button[0]
-                                if btn.is_displayed():
-                                    # Scroll into view and let any animation settle
-                                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
-                                    time.sleep(0.3)
-
-                                    btn.click()
-                                    time.sleep(0.5)
-
-                                    # Verify the AI Overview actually expanded; if not, retry with JS click
-                                    expanded = ai_overview.find_elements(by=By.CSS_SELECTOR, value=sel["ao_inner_text"])
-                                    if not expanded:
-                                        self.log("Show more button clicked but content did not expand, retrying with JS click", classes="text-orange")
-                                        self.driver.execute_script("arguments[0].click();", btn)
-                                        time.sleep(0.5)
-
-                                    self.log("Clicked show more button")
+                                if show_more_button[0].is_displayed():
+                                    show_more_button[0].click()
+                                    show_more_clicked = True
                                     break
                                 else:
                                     show_more_button = self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_show_more"])
@@ -467,6 +456,10 @@ class GoogleAIScraper:
                                 continue_notice = "trying again" if attempt < 2 else "skipping"
                                 self.log(f"Could not find the 'Show more' button, {continue_notice}",
                                          classes="text-orange")
+                                time.sleep(.5)
+
+                        if not show_more_clicked:
+                            self.log("Failed to click 'Show more' button after 3 attempts, continuing anyway", classes="text-red")
 
                     ai_overview_inner = None
                     retry_ai_overview_count = 0
@@ -495,6 +488,7 @@ class GoogleAIScraper:
                     # Get URLs
                     urls = []
                     url_divs = []
+					carousel_divs = None
                     show_more_urls_button = ai_overview.find_elements(by=By.CSS_SELECTOR, value=sel["ao_show_more_urls"])
 
                     if show_more_urls_button:
@@ -520,7 +514,7 @@ class GoogleAIScraper:
 
                     for url_div in url_divs:
                         if url_div.is_displayed():
-                            url_div_title = url_div.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_title"])[0].text
+                            url_div_title = url_div.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_title"] + " > span" if not carousel_divs else sel["ao_url_title"])[0].text
                             url_div_a = url_div.find_element(by=By.CSS_SELECTOR, value="a")
                             url_div_url = url_div_a.get_attribute("href")
                             url_div_description = url_div.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_description"])
@@ -542,6 +536,7 @@ class GoogleAIScraper:
                     if self.scrape_claims:
                         ai_overview_data["claims"] = self.get_ai_overview_claims(ai_overview_inner[0])
 
+                self.driver.execute_script("window.scrollTo(0, 0);")
                 return ai_overview_data
             else:
                 return {}
@@ -560,7 +555,7 @@ class GoogleAIScraper:
                     retries = 0
                     while retries <= 5:
                         retries += 1
-                        self.log("AI Overview may not be done generating, waiting 2 secs...", classes="text-orange")
+                        self.log("AI Mode may not be done generating, waiting 2 secs...", classes="text-orange")
                         time.sleep(2)
                         generated = True if ai_mode.find_elements(by=By.CSS_SELECTOR, value=sel["am_processed_answer"]) else False
                         if generated:
