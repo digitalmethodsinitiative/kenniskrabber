@@ -48,7 +48,7 @@ class GoogleAIScraper:
     # Default CSS selectors for AI Overview scraping
     DEFAULT_AO_SELECTORS = {
         "ao_container": "#eKIzJc",
-        "ao_show_more": "div[aria-controls='m-x-content']",
+        "ao_show_more": "div[aria-controls='m-x-content'] > div",
         "ao_failed_elements": ".YWpX0d[style='']",
         "ao_inner_text": "div[jsname][data-rl] > div:not([id]) div[data-container-id='main-col']",
         "ao_prompt_input": "div[data-active='input-plate-active']",
@@ -442,10 +442,23 @@ class GoogleAIScraper:
                     if show_more_button:
                         for attempt in range(3):
                             try:
-                                if show_more_button[0].is_displayed():
+                                btn = show_more_button[0]
+                                if btn.is_displayed():
+                                    # Scroll into view and let any animation settle
+                                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+                                    time.sleep(0.3)
+
+                                    btn.click()
+                                    time.sleep(0.5)
+
+                                    # Verify the AI Overview actually expanded; if not, retry with JS click
+                                    expanded = ai_overview.find_elements(by=By.CSS_SELECTOR, value=sel["ao_inner_text"])
+                                    if not expanded:
+                                        self.log("Show more button clicked but content did not expand, retrying with JS click", classes="text-orange")
+                                        self.driver.execute_script("arguments[0].click();", btn)
+                                        time.sleep(0.5)
+
                                     self.log("Clicked show more button")
-                                    show_more_button[0].click()
-                                    time.sleep(.5)
                                     break
                                 else:
                                     show_more_button = self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_show_more"])
@@ -629,19 +642,32 @@ class GoogleAIScraper:
     def get_ai_overview_claims(self, ai_text_inner) -> list:
         """
         Get the claims from an AI Overview.
-        This clicks every link badge to extract the claim and sources.
+        This hovers over every link badge to extract the claim and sources.
         """
 
         claims = []
+        actions = ActionChains(self.driver)
+        safe_element = self.driver.find_element(By.TAG_NAME, "body")
+
         for link_badge in ai_text_inner.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_source_badge"]):
 
-            if link_badge.is_displayed():
+            if not link_badge.is_displayed():
+                continue
 
-                # Click the badge
-                link_badge.click()
+            try:
+                # Scroll the badge into the center of the viewport before hovering
+                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", link_badge)
+                time.sleep(0.15)
+
+                # Hover over the badge to trigger the popup
+                actions.move_to_element(link_badge).perform()
+                time.sleep(0.4)
 
                 claim_text = ai_text_inner.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_claim"])
                 if not claim_text:
+                    # Dismiss any open popup by moving to a safe element, then try next badge
+                    actions.move_to_element(safe_element).perform()
+                    time.sleep(0.2)
                     continue
 
                 claim_text = claim_text[0].get_attribute("innerHTML")
@@ -666,10 +692,17 @@ class GoogleAIScraper:
 
                 claims.append(claim)
 
-                # Make sure old pop-ups disappear by clicking top search bar
-                self.driver.execute_script("window.scrollTo(0, 0);")
-                time.sleep(.1)
-                ActionChains(self.driver).move_by_offset(1, 1).click().perform()
+            except (StaleElementReferenceException, ElementNotInteractableException):
+                pass
+
+            finally:
+                # Dismiss any open popup by moving the mouse to a safe in-bounds element
+                # before proceeding to the next badge, so it won't overlay the next one
+                try:
+                    actions.move_to_element(safe_element).perform()
+                    time.sleep(0.1)
+                except Exception:
+                    pass
 
         return claims
 
