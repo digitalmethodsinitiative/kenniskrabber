@@ -19,7 +19,7 @@ from markdownify import markdownify as md
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
-from selenium.common.exceptions import WebDriverException, TimeoutException, ElementNotInteractableException, StaleElementReferenceException
+from selenium.common.exceptions import WebDriverException, TimeoutException, ElementNotInteractableException, StaleElementReferenceException, NoSuchElementException
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.wait import WebDriverWait
 
@@ -54,6 +54,7 @@ class GoogleAIScraper:
         "ao_inner_text": "div[jsname][data-rl] > div:not([id]) div[data-container-id='main-col']",
         "ao_prompt_input": "div[data-active='input-plate-active']",
         "ao_source_badge": "span.uJ19be",
+        "ao_main_claim": "span[data-subtree]",
         "ao_claim": ".Lem6n",
         "ao_claim_url": "li.sEA2wc > div[data-src-id][data-crb-el]",
         "ao_show_more_urls": "#rw0ISc",
@@ -388,7 +389,7 @@ class GoogleAIScraper:
                 ai_overview = ai_overview[0]
 
                 try:
-                    wait = WebDriverWait(self.driver, 3)
+                    wait = WebDriverWait(self.driver, 1)
                     try:
                         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#folsrch-ghost")))
                     except TimeoutException:
@@ -439,104 +440,104 @@ class GoogleAIScraper:
                         self.driver.refresh()
                         self.check_for_captcha()
                         continue
-                else:
-                    if show_more_button:
+
+                # Click the show more button
+                for attempt in range(3):  # try to click three times
+                    try:
+                        show_more_button[0].click()
+                        break
+                    except (StaleElementReferenceException, ElementNotInteractableException, NoSuchElementException, IndexError):
+                        show_more_button = self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_show_more"])
+                        continue_notice = "trying again" if attempt < 2 else "skipping"
+                        self.log(f"Could not find the 'Show more' button, {continue_notice}",
+                                 classes="text-orange")
                         time.sleep(.5)
-                        show_more_clicked = False
-                        for attempt in range(3):
-                            try:
-                                if show_more_button[0].is_displayed():
-                                    show_more_button[0].click()
-                                    show_more_clicked = True
-                                    break
-                                else:
-                                    show_more_button = self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_show_more"])
-                            except (StaleElementReferenceException, ElementNotInteractableException):
-                                show_more_button = self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_show_more"])
-                                continue_notice = "trying again" if attempt < 2 else "skipping"
-                                self.log(f"Could not find the 'Show more' button, {continue_notice}",
-                                         classes="text-orange")
-                                time.sleep(.5)
+                else:
+                    self.log("Failed to click 'Show more' button after 3 attempts, continuing anyway", classes="text-red")
 
-                        if not show_more_clicked:
-                            self.log("Failed to click 'Show more' button after 3 attempts, continuing anyway", classes="text-red")
+                # Get contents of AI Overview
+                ai_overview_inner = None
+                retry_ai_overview_count = 0
+                while not ai_overview_inner:
+                    ai_overview_inner = ai_overview.find_elements(by=By.CSS_SELECTOR, value=sel["ao_inner_text"])
+                    retry_ai_overview_count += 1
+                    if retry_ai_overview_count > 5:
+                        self.log("AI Overview hidden or not found, skipping...", classes="text-orange")
+                        return {}
+                    if not ai_overview_inner:
+                        time.sleep(0.5)
 
-                    ai_overview_inner = None
-                    retry_ai_overview_count = 0
-                    while not ai_overview_inner:
-                        ai_overview_inner = ai_overview.find_elements(by=By.CSS_SELECTOR, value=sel["ao_inner_text"])
-                        retry_ai_overview_count += 1
-                        if retry_ai_overview_count > 5:
-                            self.log("AI Overview hidden or not found, skipping...", classes="text-orange")
-                            return {}
-                        if not ai_overview_inner:
-                            time.sleep(0.5)
+                # Remove prompt box
+                prompt_input = self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_prompt_input"])
+                if prompt_input:
+                    self.driver.execute_script("""
+                                var element = arguments[0];
+                                element.parentNode.removeChild(element);
+                                """, prompt_input[0])
 
-                    # Remove prompt box
-                    prompt_input = self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_prompt_input"])
-                    if prompt_input:
-                        self.driver.execute_script("""
-                                    var element = arguments[0];
-                                    element.parentNode.removeChild(element);
-                                    """, prompt_input[0])
+                # Get text
+                ai_overview_outer = ai_overview_inner[0].get_attribute("outerHTML")
+                ai_overview_contents_md = md(ai_overview_outer, strip=["a", "img", "button", "span[id]"])
+                ai_overview_data["text"] = ai_overview_contents_md
 
-                    # Get text
-                    ai_overview_outer = ai_overview_inner[0].get_attribute("outerHTML")
-                    ai_overview_contents_md = md(ai_overview_outer, strip=["a", "img", "button", "span[id]"])
-                    ai_overview_data["text"] = ai_overview_contents_md
+                # Get highlighted answer
+                main_answer = self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_main_claim"])
+                ai_overview_data["main_answer"] = main_answer[0].get_attribute("innerHTML") if main_answer else ""
 
-                    # Get URLs
-                    urls = []
-                    url_divs = []
-					carousel_divs = None
-                    show_more_urls_button = ai_overview.find_elements(by=By.CSS_SELECTOR, value=sel["ao_show_more_urls"])
+                # Get URLs
+                urls = []
+                url_divs = []
+                carousel_divs = None
+                show_more_urls_button = ai_overview.find_elements(by=By.CSS_SELECTOR, value=sel["ao_show_more_urls"])
 
-                    if show_more_urls_button:
-                        for show_more_url_button in show_more_urls_button:
-                            try:
-                                self.wait.until(lambda d: any(
-                                    el.is_displayed() for el in
-                                    d.find_elements(By.CSS_SELECTOR, sel["ao_show_more_urls"])
-                                ))
-                                show_more_url_button.click()
-                                url_divs = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_divs"])
-                            except (TimeoutException, ElementNotInteractableException):
-                                url_divs = self.driver.find_elements(by=By.CSS_SELECTOR,
-                                                                     value=sel["ao_url_divs_not_expandable"])
-                                self.log("Warning: Could not expand URL box, continuing anyway", classes="text-orange")
+                if show_more_urls_button:
+                    for show_more_url_button in show_more_urls_button:
+                        try:
+                            self.wait.until(lambda d: any(
+                                el.is_displayed() for el in
+                                d.find_elements(By.CSS_SELECTOR, sel["ao_show_more_urls"])
+                            ))
+                            show_more_url_button.click()
+                            url_divs = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_divs"])
+                        except (TimeoutException, ElementNotInteractableException):
+                            url_divs = self.driver.find_elements(by=By.CSS_SELECTOR,
+                                                                 value=sel["ao_url_divs_not_expandable"])
+                            self.log("Warning: Could not expand URL box, continuing anyway", classes="text-orange")
 
+                else:
+                    carousel_divs = ai_overview.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_divs_carousel"])
+                    if carousel_divs:
+                        url_divs = carousel_divs
                     else:
-                        carousel_divs = ai_overview.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_divs_carousel"])
-                        if carousel_divs:
-                            url_divs = carousel_divs
-                        else:
-                            url_divs = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_divs_not_expandable"])
+                        url_divs = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_divs_not_expandable"])
 
-                    for url_div in url_divs:
-                        if url_div.is_displayed():
-                            url_div_title = url_div.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_title"] + " > span" if not carousel_divs else sel["ao_url_title"])[0].text
-                            url_div_a = url_div.find_element(by=By.CSS_SELECTOR, value="a")
-                            url_div_url = url_div_a.get_attribute("href")
-                            url_div_description = url_div.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_description"])
-                            url_div_description += url_div.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_description_fallback"])
-                            description = url_div_description[0].text if url_div_description else ""
+                for url_div in url_divs:
+                    if url_div.is_displayed():
+                        url_div_title = url_div.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_title"] + " > span" if not carousel_divs else sel["ao_url_title"])[0].text
+                        url_div_a = url_div.find_element(by=By.CSS_SELECTOR, value="a")
+                        url_div_url = url_div_a.get_attribute("href")
+                        url_div_description = url_div.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_description"])
+                        url_div_description += url_div.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_description_fallback"])
+                        description = url_div_description[0].text if url_div_description else ""
 
-                            url = {
-                                "title": url_div_title,
-                                "description": description,
-                                "domain": urlparse(url_div_url).netloc,
-                                "url": url_div_url,
-                            }
-                            urls.append(url)
-                            self.source_urls_to_scrape.add(url_div_url) # Add to queue
+                        url = {
+                            "title": url_div_title,
+                            "description": description,
+                            "domain": urlparse(url_div_url).netloc,
+                            "url": url_div_url,
+                        }
+                        urls.append(url)
+                        self.source_urls_to_scrape.add(url_div_url) # Add to queue
 
-                    ai_overview_data["sources"] = urls
+                ai_overview_data["sources"] = urls
 
-                    # Get claims
-                    if self.scrape_claims:
-                        ai_overview_data["claims"] = self.get_ai_overview_claims(ai_overview_inner[0])
+                # Get claims
+                if self.scrape_claims:
+                    ai_overview_data["claims"] = self.get_ai_overview_claims(ai_overview_inner[0])
 
+                # Reset stuff; scroll to top and click top left
                 self.driver.execute_script("window.scrollTo(0, 0);")
+                self.driver.execute_script("document.elementFromPoint(0, 0).click();")
                 return ai_overview_data
             else:
                 return {}
@@ -642,7 +643,7 @@ class GoogleAIScraper:
 
         claims = []
         actions = ActionChains(self.driver)
-        safe_element = self.driver.find_element(By.TAG_NAME, "body")
+        body_element = self.driver.find_element(By.TAG_NAME, "body")
 
         for link_badge in ai_text_inner.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_source_badge"]):
 
@@ -661,7 +662,7 @@ class GoogleAIScraper:
                 claim_text = ai_text_inner.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_claim"])
                 if not claim_text:
                     # Dismiss any open popup by moving to a safe element, then try next badge
-                    actions.move_to_element(safe_element).perform()
+                    actions.move_to_element(body_element).perform()
                     time.sleep(0.2)
                     continue
 
@@ -694,7 +695,7 @@ class GoogleAIScraper:
                 # Dismiss any open popup by moving the mouse to a safe in-bounds element
                 # before proceeding to the next badge, so it won't overlay the next one
                 try:
-                    actions.move_to_element(safe_element).perform()
+                    actions.move_to_element(body_element).perform()
                     time.sleep(0.1)
                 except Exception:
                     pass
@@ -982,8 +983,9 @@ class GUI:
                         "ao_failed_elements": ("Failed elements", "Elements indicating AI Overview failed to load"),
                         "ao_inner_text": ("Inner text", "Element containing the AI Overview inner text"),
                         "ao_source_badge": ("Source badge", "Source badge within the AI Overview"),
-                        "ao_claim": ("Claims", "Selector for highlighted claims after clicking a source badge"),
-                        "ao_claim_url": ("Claim source box", "Source box in pop-up that opens after clicking a source badge."),
+                        "ao_main_claim": ("Main answer", "Highlighted claim in the AI Overview"),
+                        "ao_claim": ("Claims", "Highlighted claims after hovering over a source badge"),
+                        "ao_claim_url": ("Claim source box", "Source box in pop-up that opens after hovering over a source badge."),
                         "ao_show_more_urls": ("Show more URLs button", "Button to expand the source URL list"),
                         "ao_url_divs": ("Sources (expandable box)", "List items for sources after clicking 'Show more'"),
                         "ao_url_divs_not_expandable": ("Sources (not expandable)", "List items for sources without 'Show more' button"),
