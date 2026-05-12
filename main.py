@@ -499,7 +499,7 @@ class GoogleAIScraper:
 
                 # Get highlighted answer
                 main_answer = self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_main_claim"])
-                ai_overview_data["main_answer"] = main_answer[0].get_attribute("innerHTML") if main_answer else ""
+                ai_overview_data["main_answer"] = main_answer[0].text if main_answer else ""
 
                 # Get URLs
                 urls = []
@@ -683,19 +683,18 @@ class GoogleAIScraper:
                     time.sleep(0.2)
                     continue
 
-                claim_text = claim_text[0].get_attribute("innerHTML")
-                claim_text = md(claim_text, strip=["a", "img"])
+                claim_text = claim_text[0].text
 
                 claim_sources = []
                 for source_box in self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_claim_url"]):
                     if source_box.is_displayed():
                         claim_source = {}
-                        claim_source["title"] = source_box.find_element(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_title"]).get_attribute("innerHTML")
+                        claim_source["title"] = source_box.find_element(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_title"]).text
                         claim_url = source_box.find_element(by=By.CSS_SELECTOR, value="a").get_attribute("href")
                         claim_source["url_id"] = hashlib.md5(claim_url.encode()).hexdigest()
                         claim_source["url"] = claim_url
                         claim_source["domain"] = urlparse(claim_url).netloc
-                        claim_source["description"] = source_box.find_element(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_description"]).get_attribute("innerHTML")
+                        claim_source["description"] = source_box.find_element(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_description"]).text
                         claim_sources.append(claim_source)
 
                 claim = {
