@@ -53,7 +53,7 @@ class GoogleAIScraper:
         "ao_inner_text": "div[jsname][data-rl] > div:not([id]) div[data-container-id='main-col']",
         "ao_prompt_input": "div[data-active='input-plate-active']",
         "ao_source_badge": "span.uJ19be",
-        "ao_main_claim": "span[data-subtree]",
+        "ao_main_claim": "div > mark[jsuid][data-sfc-root]",
         "ao_claim": ".Lem6n",
         "ao_claim_url": "li.sEA2wc > div[data-src-id][data-crb-el]",
         "ao_show_more_urls": "#rw0ISc",
