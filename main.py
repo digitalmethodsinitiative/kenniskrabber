@@ -19,8 +19,7 @@ from markdownify import markdownify as md
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
-from selenium.common.exceptions import WebDriverException, TimeoutException, ElementNotInteractableException, StaleElementReferenceException, NoSuchElementException
-from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import WebDriverException, TimeoutException, ElementNotInteractableException, StaleElementReferenceException, NoSuchElementException, ElementClickInterceptedException
 from selenium.webdriver.support.wait import WebDriverWait
 
 from nicegui import ui, run
@@ -107,6 +106,7 @@ class GoogleAIScraper:
         self.finished_ai_mode_queries = set()
         self.source_urls_to_scrape = set()
         self.scrape_durations = deque(maxlen=20)
+        self.query_extra_data = {}  # query_id -> dict of extra columns from query file
 
     def log(self, msg, classes=None):
         """Send messages to the NiceGUI log UI"""
@@ -183,6 +183,11 @@ class GoogleAIScraper:
                     query = row.get("query", list(row.values())[0])
                     query_id = row.get("id", hashlib.md5(query.encode()).hexdigest())
                     self.iterate_queries.add((query_id, query))
+
+                    # Store extra columns (all columns except 'query' and 'id')
+                    extra = {k: v for k, v in row.items() if k not in ("query", "id")}
+                    if extra:
+                        self.query_extra_data[query_id] = extra
 
         elif self.inserted_queries:
             for line in self.inserted_queries.split("\n"):
@@ -281,6 +286,10 @@ class GoogleAIScraper:
                         result = self.parse_ai_overview(page_id, query)
 
                         if result:
+                            # Merge extra query file columns (skip clashing keys)
+                            for k, v in self.query_extra_data.get(page_id, {}).items():
+                                if k not in result:
+                                    result[k] = v
                             self.log(f"Parsed AI Overview for: {query}", classes="text-blue")
                             with open(self.results_file, "a", encoding="utf-8") as out_file:
                                 out_file.write(json.dumps(result) + "\n")
@@ -303,6 +312,10 @@ class GoogleAIScraper:
                         result = self.parse_ai_mode(page_id, query)
 
                         if result:
+                            # Merge extra query file columns (skip clashing keys)
+                            for k, v in self.query_extra_data.get(page_id, {}).items():
+                                if k not in result:
+                                    result[k] = v
                             self.log(f"Parsed AI Mode for: {query}", classes="text-blue")
                             with open(self.results_file, "a", encoding="utf-8") as out_file:
                                 out_file.write(json.dumps(result) + "\n")
@@ -325,16 +338,23 @@ class GoogleAIScraper:
                     with open(csv_filename, write_mode, encoding="utf-8", newline="") as out_csv:
                         write_header = True if write_mode == "w" else False
                         writer = None # Pre-define writer
-                        for line in in_json.readlines():
-                            csv_line = json.loads(line)
+                        all_lines = [json.loads(line) for line in in_json.readlines() if line.strip()]
 
-                            if writer is None:
-                                writer = csv.DictWriter(out_csv, fieldnames=csv_line.keys())
-                                if write_header:
-                                    writer.writeheader()
+                        if all_lines:
+                            # Collect all fieldnames across all rows to handle variable extra columns
+                            all_keys = list(all_lines[0].keys())
+                            for csv_line in all_lines[1:]:
+                                for k in csv_line.keys():
+                                    if k not in all_keys:
+                                        all_keys.append(k)
 
-                            csv_line["sources"] = self.source_to_string(csv_line["sources"]) if csv_line["sources"] else ""
-                            writer.writerow(csv_line)
+                            writer = csv.DictWriter(out_csv, fieldnames=all_keys, extrasaction='ignore')
+                            if write_header:
+                                writer.writeheader()
+
+                            for csv_line in all_lines:
+                                csv_line["sources"] = self.source_to_string(csv_line["sources"]) if csv_line.get("sources") else ""
+                                writer.writerow(csv_line)
 
                 self.log("Google scraping completed.", classes="text-blue")
 
@@ -389,15 +409,10 @@ class GoogleAIScraper:
                 ai_overview = ai_overview[0]
 
                 try:
-                    wait = WebDriverWait(self.driver, 1)
-                    try:
-                        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#folsrch-ghost")))
-                    except TimeoutException:
-                        pass
-
-                    # wait for generating div
+                    # Wait up to 10 seconds for the ghost to either appear and disappear,
+                    # OR to never appear at all (meaning content was already fully loaded)
                     WebDriverWait(self.driver, 10).until(
-                        EC.invisibility_of_element_located((By.CSS_SELECTOR, "#folsrch-ghost"))
+                        lambda d: len(d.find_elements(By.CSS_SELECTOR, "#folsrch-ghost")) == 0
                     )
                 except TimeoutException:
                     self.log("Warning: #folsrch-ghost still present after timeout, continuing anyway",
@@ -446,12 +461,14 @@ class GoogleAIScraper:
                     try:
                         show_more_button[0].click()
                         break
-                    except (StaleElementReferenceException, ElementNotInteractableException, NoSuchElementException, IndexError):
+                    except (StaleElementReferenceException, ElementNotInteractableException, NoSuchElementException, ElementClickInterceptedException, IndexError):
+                        self.driver.execute_script("window.scrollTo(0, 0);")
+                        self.driver.execute_script("document.elementFromPoint(0, 0).click();")
                         show_more_button = self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_show_more"])
                         continue_notice = "trying again" if attempt < 2 else "skipping"
                         self.log(f"Could not find the 'Show more' button, {continue_notice}",
                                  classes="text-orange")
-                        time.sleep(.5)
+                        time.sleep(2)
                 else:
                     self.log("Failed to click 'Show more' button after 3 attempts, continuing anyway", classes="text-red")
 
@@ -741,13 +758,13 @@ class GoogleAIScraper:
 
     def stop(self):
         self.is_running = False
-        # if self.driver:
-        #     try:
-        #         self.driver.quit()
-        #         self.log("Firefox browser closed.", classes="text-blue")
-        #         self.driver = None
-        #     except:
-        #         pass
+        if self.driver:
+            try:
+                self.driver.quit()
+                self.log("Firefox browser closed.", classes="text-blue")
+                self.driver = None
+            except:
+                pass
 
     def restart_driver(self):
         """Quit the current browser and start a fresh one, preserving the wait object."""
