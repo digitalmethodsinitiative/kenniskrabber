@@ -54,7 +54,7 @@ class GoogleAIScraper:
         "ao_inner_text": "div[jsname][data-rl] > div:not([id]) div[data-container-id='main-col']",
         "ao_prompt_input": "div[data-active='input-plate-active']",
         "ao_source_badge": "span.uJ19be",
-        "ao_main_claim": "span[data-subtree]",
+        "ao_main_claim": "mark[class][jsuid]",
         "ao_claim": ".Lem6n",
         "ao_claim_url": "li.sEA2wc > div[data-src-id][data-crb-el]",
         "ao_show_more_urls": "#rw0ISc",
@@ -74,6 +74,7 @@ class GoogleAIScraper:
         "am_show_more_urls": "div[data-processed=true] > div.BjvG9b",
         "am_url_box": "li.CyMdWb > div[data-complete=true]",
         "am_url_description": ".vhJ6Pe",
+        "am_something_went_wrong": "div > p > i"
     }
 
     def __init__(self, scrape_mode="both", base_url=None, profile="", iterate_queries=set(),
@@ -581,8 +582,9 @@ class GoogleAIScraper:
                     if throttled_string in ai_mode_inner:
                         throttled = throttled_string
                         break
-                if throttled:
-                    self.log(f"Throttled (found: '{throttled}'), trying again in 10 minutes. Keep the browser window open.", classes="text-orange")
+                something_went_wrong = ai_mode.find_elements(by=By.CSS_SELECTOR, value=sel["am_something_went_wrong"])
+                if throttled or something_went_wrong:
+                    self.log(f"Throttled, trying again in 10 minutes. Keep the browser window open.", classes="text-orange")
                     time.sleep(600)
                     self.driver.refresh()
                     self.check_for_captcha()
@@ -602,9 +604,11 @@ class GoogleAIScraper:
                             self.log("ERROR: Could not expand URL box, continuing anyway", classes="text-orange")
 
                 ai_mode_html = ai_mode.find_elements(by=By.CSS_SELECTOR, value=sel["am_answers"])
+
                 if not ai_mode_html:
                     time.sleep(6)
-                    ai_mode.find_elements(by=By.CSS_SELECTOR, value=sel["am_answers"])
+                    ai_mode_html = ai_mode.find_elements(by=By.CSS_SELECTOR, value=sel["am_answers"])
+
                 ai_mode_html = ai_mode_html[0].get_attribute("outerHTML")
 
                 ai_mode_contents_md = md(ai_mode_html, strip=["a", "img"])
@@ -1001,6 +1005,7 @@ class GUI:
                         "am_show_more_urls": ("Show more URLs btn", "Button to expand the source URL list"),
                         "am_url_box": ("URL items", "List items for source URLs"),
                         "am_url_description": ("URL description", "Element with the source description text"),
+                        "am_something_went_wrong": ("Failed generation box", "Element indicating AI Mode failed to generate an answer, often due to throttling"),
                     }
 
                     with ui.expansion('CSS Selectors').classes('w-full'):
