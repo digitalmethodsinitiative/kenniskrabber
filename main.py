@@ -13,7 +13,7 @@ import tempfile
 import shutil
 import requests
 from datetime import datetime, timedelta
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 from markdownify import markdownify as md
 
 from selenium import webdriver
@@ -537,12 +537,24 @@ class GoogleAIScraper:
                         url_div_description += url_div.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_description_fallback"])
                         description = url_div_description[0].text if url_div_description else ""
 
+                        is_translated = "translate.google.com" in (url_div_url or "")
+                        if is_translated:
+                            translated = self.parse_translate_url(url_div_url)
+                            display_url = translated["original_url"]
+                            display_domain = translated["original_domain"]
+                        else:
+                            display_url = url_div_url
+                            display_domain = urlparse(url_div_url).netloc
+
                         url = {
                             "title": url_div_title,
                             "description": description,
-                            "domain": urlparse(url_div_url).netloc,
-                            "url": url_div_url,
+                            "domain": display_domain,
+                            "url": display_url,
+                            "is_translated": is_translated,
                         }
+                        if is_translated:
+                            url["translated_url"] = url_div_url
                         urls.append(url)
                         self.source_urls_to_scrape.add(url_div_url) # Add to queue
 
@@ -636,12 +648,24 @@ class GoogleAIScraper:
                     url_div_description = url_div.find_elements(by=By.CSS_SELECTOR, value=sel["am_url_description"])
                     description = url_div_description[0].text if url_div_description else ""
 
+                    is_translated = "translate.google.com" in (url_div_url or "")
+                    if is_translated:
+                        translated = self.parse_translate_url(url_div_url)
+                        display_url = translated["original_url"]
+                        display_domain = translated["original_domain"]
+                    else:
+                        display_url = url_div_url
+                        display_domain = urlparse(url_div_url).netloc
+
                     url = {
                         "title": url_div_a.get_attribute("aria-label"),
                         "description": description,
-                        "domain": urlparse(url_div_url).netloc,
-                        "url": url_div_url,
+                        "domain": display_domain,
+                        "url": display_url,
+                        "is_translated": is_translated,
                     }
+                    if is_translated:
+                        url["translated_url"] = url_div_url
                     urls.append(url)
                     self.source_urls_to_scrape.add(url_div_url) # Add to queue
 
@@ -692,8 +716,17 @@ class GoogleAIScraper:
                         claim_source["title"] = source_box.find_element(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_title"]).text
                         claim_url = source_box.find_element(by=By.CSS_SELECTOR, value="a").get_attribute("href")
                         claim_source["url_id"] = hashlib.md5(claim_url.encode()).hexdigest()
-                        claim_source["url"] = claim_url
-                        claim_source["domain"] = urlparse(claim_url).netloc
+                        is_translated = "translate.google.com" in (claim_url or "")
+                        if is_translated:
+                            translated = self.parse_translate_url(claim_url)
+                            claim_source["url"] = translated["original_url"]
+                            claim_source["domain"] = translated["original_domain"]
+                            claim_source["is_translated"] = True
+                            claim_source["translated_url"] = claim_url
+                        else:
+                            claim_source["url"] = claim_url
+                            claim_source["domain"] = urlparse(claim_url).netloc
+                            claim_source["is_translated"] = False
                         claim_source["description"] = source_box.find_element(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_description"]).text
                         claim_sources.append(claim_source)
 
@@ -898,6 +931,19 @@ class GoogleAIScraper:
             filename += suffix
         return filename
 
+
+    @staticmethod
+    def parse_translate_url(url: str) -> dict:
+        """If a URL is a Google Translate proxy, return the original URL and its domain."""
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        original_url = params.get("u", [None])[0]
+        if original_url:
+            return {
+                "original_url": original_url,
+                "original_domain": urlparse(original_url).netloc,
+            }
+        return {"original_url": url, "original_domain": urlparse(url).netloc}
 
     @staticmethod
     def source_to_string(sources) -> str:
