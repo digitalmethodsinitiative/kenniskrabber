@@ -10,7 +10,7 @@ While it does not circumvent any CAPTCHAs, Kenniskrabber does speed up the [mean
 1. AI Mode and AI Overview responses as a CSV
 2. Full-page screenshots
 3. HTML of the Google SERP and AI Mode answers
-4. (coming soon) HTML of the linked-to sources
+4. HTML of the linked-to sources
 5. (coming soon) Metadata and analyses
 
 ## Installation
