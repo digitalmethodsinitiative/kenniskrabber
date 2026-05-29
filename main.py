@@ -52,10 +52,10 @@ class GoogleAIScraper:
         "ao_failed_elements": ".YWpX0d[style='']",
         "ao_inner_text": "div[jsname][data-rl] > div:not([id]) div[data-container-id='main-col']",
         "ao_prompt_input": "div[data-active='input-plate-active']",
-        "ao_source_badge": "span.uJ19be",
+        "ao_source_badge": "span[data-animation-atomic] > button > :is(div, span):first-child",
         "ao_main_claim": "div > mark[jsuid][data-sfc-root]",
-        "ao_claim": ".Lem6n",
-        "ao_claim_url": "li.sEA2wc > div[data-src-id][data-crb-el]",
+        "ao_claim": ".NOp1Jf",
+        "ao_claim_url": "div[data-skip-highlighting] div[data-src-id][data-crb-el]",
         "ao_show_more_urls": "#rw0ISc",
         "ao_url_divs": "li.CyMdWb > div",
         "ao_url_divs_not_expandable": "ul > li[data-processed] > div[data-src-id]",
@@ -683,76 +683,74 @@ class GoogleAIScraper:
     def get_ai_overview_claims(self, ai_text_inner) -> list:
         """
         Get the claims from an AI Overview.
-        This hovers over every link badge to extract the claim and sources.
+        Iterates badges in *reverse* order so each badge is scrolled to the top
+        of the viewport, forcing the popup to open downward (never obscuring the
+        next badge). Scrolling to the next badge naturally dismisses the current
+        popup. The collected claims are reversed before returning so the final
+        list matches the original top-to-bottom order.
         """
 
         claims = []
         actions = ActionChains(self.driver)
-        body_element = self.driver.find_element(By.TAG_NAME, "body")
 
-        for link_badge in ai_text_inner.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_source_badge"]):
+        all_badges = [
+            b for b in ai_text_inner.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_source_badge"])
+            if b.is_displayed()
+        ]
 
-            if not link_badge.is_displayed():
-                continue
+        for link_badge in reversed(all_badges):
 
-            try:
-                # Scroll the badge into the center of the viewport before hovering
-                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", link_badge)
-                time.sleep(0.15)
+            # Scroll badge to the TOP of the viewport so the popup opens downward,
+            # and so the scroll itself dismisses any previously open popup.
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'start'});", link_badge)
+            time.sleep(0.2)
 
-                # Hover over the badge to trigger the popup
-                actions.move_to_element(link_badge).perform()
-                time.sleep(0.4)
+            # Hover over the badge to trigger the popup
+            actions.move_to_element(link_badge).perform()
+            time.sleep(0.4)
 
-                claim_text = ai_text_inner.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_claim"])
-                if not claim_text:
-                    # Dismiss any open popup by moving to a safe element, then try next badge
-                    actions.move_to_element(body_element).perform()
-                    time.sleep(0.2)
-                    continue
+            claim_text = ai_text_inner.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_claim"])
+            # Claim highlights do not always appear!
+            if not claim_text or not claim_text[0] or not claim_text[0].is_displayed() or not claim_text[0].text:
+                claim_text = ""
+            else:
+                # Skip button text in claim -- not easily filterable through CSS selector unfortunately
+                # Replace line 718-720 with:
+                claim_text_elements = claim_text[0].find_elements(By.XPATH, ".//*[not(ancestor-or-self::button)][not(*)]")
+                claim_text = " ".join([
+                    el.get_attribute("textContent").strip()
+                    for el in claim_text_elements
+                    if el.get_attribute("textContent").strip()
+                ])
 
-                claim_text = claim_text[0].text
+            claim_sources = []
+            for source_box in self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_claim_url"]):
+                if source_box.is_displayed():
+                    claim_source = {}
+                    claim_source["title"] = source_box.find_element(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_title"]).text
+                    claim_url = source_box.find_element(by=By.CSS_SELECTOR, value="a").get_attribute("href")
+                    claim_source["url_id"] = hashlib.md5(claim_url.encode()).hexdigest()
+                    is_translated = "translate.google.com" in (claim_url or "")
+                    if is_translated:
+                        translated = self.parse_translate_url(claim_url)
+                        claim_source["url"] = translated["original_url"]
+                        claim_source["domain"] = translated["original_domain"]
+                        claim_source["is_translated"] = True
+                        claim_source["translated_url"] = claim_url
+                    else:
+                        claim_source["url"] = claim_url
+                        claim_source["domain"] = urlparse(claim_url).netloc
+                        claim_source["is_translated"] = False
+                    claim_source["description"] = source_box.find_element(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_description"]).text
+                    claim_sources.append(claim_source)
 
-                claim_sources = []
-                for source_box in self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_claim_url"]):
-                    if source_box.is_displayed():
-                        claim_source = {}
-                        claim_source["title"] = source_box.find_element(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_title"]).text
-                        claim_url = source_box.find_element(by=By.CSS_SELECTOR, value="a").get_attribute("href")
-                        claim_source["url_id"] = hashlib.md5(claim_url.encode()).hexdigest()
-                        is_translated = "translate.google.com" in (claim_url or "")
-                        if is_translated:
-                            translated = self.parse_translate_url(claim_url)
-                            claim_source["url"] = translated["original_url"]
-                            claim_source["domain"] = translated["original_domain"]
-                            claim_source["is_translated"] = True
-                            claim_source["translated_url"] = claim_url
-                        else:
-                            claim_source["url"] = claim_url
-                            claim_source["domain"] = urlparse(claim_url).netloc
-                            claim_source["is_translated"] = False
-                        claim_source["description"] = source_box.find_element(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_description"]).text
-                        claim_sources.append(claim_source)
+            claims.append({
+                "claim": claim_text,
+                "sources": claim_sources
+            })
 
-                claim = {
-                    "claim": claim_text,
-                    "sources": claim_sources
-                }
-
-                claims.append(claim)
-
-            except (StaleElementReferenceException, ElementNotInteractableException):
-                pass
-
-            finally:
-                # Dismiss any open popup by moving the mouse to a safe in-bounds element
-                # before proceeding to the next badge, so it won't overlay the next one
-                try:
-                    actions.move_to_element(body_element).perform()
-                    time.sleep(0.1)
-                except Exception:
-                    pass
-
+        # Reverse back to chronological (top-to-bottom) order
+        claims.reverse()
         return claims
 
     def save_html(self, query=None, page_id=None, mode=None, output_dir="/html"):
@@ -788,6 +786,8 @@ class GoogleAIScraper:
             return
 
         self.driver.execute_script("window.scrollTo(0, 0);")
+        self.driver.execute_script("document.elementFromPoint(0, 0).click();")
+
         time.sleep(0.5)
         self.driver.save_screenshot(screenshot_location)
         self.driver.set_window_size(1920, 1080)
@@ -858,7 +858,6 @@ class GoogleAIScraper:
         captcha_selectors = [
             "iframe[src*='challenges.cloudflare.com']",
             "iframe[src*='hcaptcha.com']",
-            "iframe[src*='recaptcha']",
             "iframe[src*='datadome.co']",
             "#recaptcha"
         ]
@@ -866,7 +865,7 @@ class GoogleAIScraper:
         for selector in captcha_selectors:
             elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
             if elements and elements[0].is_displayed():
-                self.log(f"CAPTCHA detected on source page, please solve it in the Firefox window...", classes="text-orange")
+                self.log(f"CAPTCHA detected on source page, please solve it in the Firefox window or refresh...", classes="text-orange")
 
                 # Wait until the iframe vanishes or user navigates away
                 while elements and elements[0].is_displayed():
@@ -986,7 +985,7 @@ class GUI:
             ui.image(os.path.join(base_path, 'assets', 'logo_cutout.png')).style('width: 75px; height: 75px; object-fit: cover; flex-shrink: 0;')
             with ui.row().classes('p-4 self-center items-baseline gap-3'):
                 ui.label('Kenniskrabber').classes('main-title')
-                ui.label('v0.5').classes('main-title version')
+                ui.label('v0.6').classes('main-title version')
 
         with ui.row().classes('w-full p-4 gap-4 items-stretch'):
             # LEFT COLUMN - SETTINGS
@@ -1201,7 +1200,7 @@ class GUI:
     def on_stop(self):
         self.btn_stop.disable()
         if self.scraper:
-            self.scraper.stop()
+            self.scraper.is_running = False
 
     def open_output_folder(self):
         output_dir = self.output_dir.value
@@ -1218,6 +1217,7 @@ class GUI:
 from nicegui import app as nicegui_app
 
 nicegui_app.add_static_files('/static', base_path)
+nicegui_app.native.window_args['text_select'] = True  # So we can copy/paste log outputs
 
 @ui.page('/')
 def index():
