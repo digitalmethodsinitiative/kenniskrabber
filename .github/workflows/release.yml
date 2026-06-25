@@ -29,6 +29,13 @@ jobs:
         run: |
           pip install -r requirements.txt
 
+      - name: Set version from tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "APP_VERSION=$VERSION" >> "$GITHUB_ENV"
+          perl -pi -e "s/APP_VERSION = \"[^\"]*\"/APP_VERSION = \"$VERSION\"/" main.py
+
       - name: Run Build Script
         run: python build.py
 
@@ -36,7 +43,7 @@ jobs:
         if: runner.os == 'Windows'
         # ISCC is the command-line compiler for Inno Setup.
         # We use the explicit path where GitHub installs it.
-        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss'
+        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=$env:APP_VERSION setup.iss'
 
       - name: Build Mac DMG
         if: runner.os == 'macOS'

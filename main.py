@@ -7,6 +7,7 @@ from collections import deque
 from typing import Callable, Optional
 import re
 import sys
+import webbrowser
 import pickle
 import pandas as pd
 import tempfile
@@ -44,37 +45,45 @@ def get_default_output_dir(input_file=False):
 
     return default_path
 
-class GoogleAIScraper:
-    # Default CSS selectors for AI Overview scraping
-    DEFAULT_AO_SELECTORS = {
-        "ao_container": "#eKIzJc",
-        "ao_show_more": "div[aria-controls='m-x-content'] > div",
-        "ao_failed_elements": ".YWpX0d[style='']",
-        "ao_inner_text": "div[jsname][data-rl] > div:not([id]) div[data-container-id='main-col']",
-        "ao_prompt_input": "div[data-active='input-plate-active']",
-        "ao_source_badge": "span[data-animation-atomic] > button > :is(div, span):first-child",
-        "ao_main_claim": "div > mark[jsuid][data-sfc-root]",
-        "ao_claim": ".NOp1Jf",
-        "ao_claim_url": "div[data-skip-highlighting] div[data-src-id][data-crb-el]",
-        "ao_show_more_urls": "#rw0ISc",
-        "ao_url_divs": "li.CyMdWb > div",
-        "ao_url_divs_not_expandable": "ul > li[data-processed] > div[data-src-id]",
-        "ao_url_divs_carousel": "div[role='listitem'] > div[data-src-id]",
-        "ao_url_title": "div[id]",
-        "ao_url_description": "span[data-crb-snippet-text]",
-        "ao_url_description_fallback": ".dMCttd",
-    }
+SELECTORS_GITHUB_URL = "https://raw.githubusercontent.com/digitalmethodsinitiative/kenniskrabber/master/css-selectors.json"
+LOCAL_SELECTORS_PATH = os.path.join(base_path, "css-selectors.json")
 
-    # Default CSS selectors for AI Mode scraping
-    DEFAULT_AM_SELECTORS = {
-        "am_answers_container": "div[data-xid='aim-mars-turn-root']",
-        "am_answers": "#aim-chrome-initial-inline-async-container div[data-container-id=main-col]",
-        "am_processed_answer": "section #aim-chrome-initial-inline-async-container > div[data-processed=true] div.pWvJNd",
-        "am_show_more_urls": "div[data-processed=true] > div.BjvG9b",
-        "am_url_box": "li.CyMdWb > div[data-complete=true]",
-        "am_url_description": ".vhJ6Pe",
-        "am_something_went_wrong": "div > p > i"
-    }
+APP_VERSION = "0.5"
+RELEASES_API_URL = "https://api.github.com/repos/digitalmethodsinitiative/kenniskrabber/releases/latest"
+RELEASES_PAGE_URL = "https://github.com/digitalmethodsinitiative/kenniskrabber/releases/latest"
+
+def _version_tuple(tag):
+    """Turn a version tag like 'v0.6' or '1.2.0' into a comparable int tuple."""
+    return tuple(int(n) for n in re.findall(r"\d+", tag or "")) or (0,)
+
+def check_for_update():
+    """Ask GitHub for the latest release and compare it to APP_VERSION.
+
+    Returns (latest_version, release_url) when a newer release is available,
+    otherwise None. Fails silently (returns None) on any network/parse error
+    so a failed check never disrupts the app.
+    """
+    try:
+        response = requests.get(RELEASES_API_URL, timeout=5)
+        response.raise_for_status()
+        latest_tag = response.json().get("tag_name", "")
+    except Exception:
+        return None
+
+    if not latest_tag:
+        return None
+
+    current, latest = _version_tuple(APP_VERSION), _version_tuple(latest_tag)
+    # Pad to equal length so e.g. (1, 0) and (1, 0, 0) compare as equal.
+    length = max(len(current), len(latest))
+    current += (0,) * (length - len(current))
+    latest += (0,) * (length - len(latest))
+
+    if latest > current:
+        return latest_tag.lstrip("vV"), RELEASES_PAGE_URL
+    return None
+
+class GoogleAIScraper:
 
     def __init__(self, scrape_mode="both", base_url=None, profile="", iterate_queries=set(),
                  inserted_queries=None, query_file=None, results_file="", output_dir="", offset=0,
@@ -96,8 +105,8 @@ class GoogleAIScraper:
         self.offset = offset
         self.throttled_strings = [t_s.strip() for t_s in throttled_strings.split(",")] if throttled_strings else [
             "Try again later", "Something went wrong"]
-        self.ao_selectors = {**self.DEFAULT_AO_SELECTORS, **(ao_selectors or {})}
-        self.am_selectors = {**self.DEFAULT_AM_SELECTORS, **(am_selectors or {})}
+        self.ao_selectors = {**(ao_selectors or {})}
+        self.am_selectors = {**(am_selectors or {})}
         self.progress_callback = progress_callback
         self.log_callback: Optional[Callable] = log_callback
         self.profile = profile
@@ -115,6 +124,30 @@ class GoogleAIScraper:
             self.log_callback(f"> {str(msg)}", classes=classes)
         else:
             print(msg)
+
+    @staticmethod
+    def load_selectors(log=print):
+        """Return (ao_selectors, am_selectors) from the merged css-selectors.json.
+
+        Prefers the latest version fetched from GitHub so selectors can be
+        updated without shipping a new build; falls back to the bundled local
+        file if the fetch fails. Status is reported through the given log
+        callback so it shows up in the user output log.
+        """
+        merged = None
+        try:
+            response = requests.get(SELECTORS_GITHUB_URL, timeout=5)
+            response.raise_for_status()
+            merged = response.json()
+            log("Loaded CSS selectors from GitHub.")
+        except Exception as e:
+            log(f"Could not fetch CSS selectors from GitHub ({e}); using local file.")
+            with open(LOCAL_SELECTORS_PATH, "r", encoding="utf-8") as file:
+                merged = json.load(file)
+
+        ao_selectors = {k: v for k, v in merged.items() if k.startswith("ao_")}
+        am_selectors = {k: v for k, v in merged.items() if k.startswith("am_")}
+        return ao_selectors, am_selectors
 
     def get_driver(self, custom_profile=""):
         options = webdriver.FirefoxOptions()
@@ -493,8 +526,8 @@ class GoogleAIScraper:
                                 element.parentNode.removeChild(element);
                                 """, prompt_input[0])
 
-                # Get text
-                ai_overview_outer = ai_overview_inner[0].get_attribute("outerHTML")
+                # Get text (with the inline source badge buttons removed)
+                ai_overview_outer = self.html_without_source_buttons(ai_overview_inner[0])
                 ai_overview_contents_md = md(ai_overview_outer, strip=["a", "img", "button", "span[id]"])
                 ai_overview_data["text"] = ai_overview_contents_md
 
@@ -563,7 +596,7 @@ class GoogleAIScraper:
 
                 # Get claims
                 if self.scrape_claims:
-                    ai_overview_data["claims"] = self.get_ai_overview_claims(ai_overview_inner[0])
+                    ai_overview_data["claims"] = self.get_claims(ai_overview_inner[0])
 
                 # Reset stuff; scroll to top and click top left
                 self.driver.execute_script("window.scrollTo(0, 0);")
@@ -577,10 +610,11 @@ class GoogleAIScraper:
         sel = self.am_selectors
 
         while True:
-            ai_mode = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["am_answers_container"])
+            ai_mode = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["am_container"])
             if ai_mode and ai_mode[0].is_displayed():
                 ai_mode = ai_mode[0]
-                ai_mode_inner = ai_mode.text
+                ai_mode_inner = ai_mode.find_elements(by=By.CSS_SELECTOR, value=sel["am_inner_text"])[0]
+                ai_mode_inner_text = ai_mode_inner.text
 
                 if not ai_mode.find_elements(by=By.CSS_SELECTOR, value=sel["am_processed_answer"]):
                     retries = 0
@@ -608,9 +642,10 @@ class GoogleAIScraper:
 
                 throttled = None
                 for throttled_string in self.throttled_strings:
-                    if throttled_string in ai_mode_inner:
+                    if throttled_string in ai_mode_inner_text:
                         throttled = throttled_string
                         break
+
                 something_went_wrong = ai_mode.find_elements(by=By.CSS_SELECTOR, value=sel["am_something_went_wrong"])
                 if throttled or something_went_wrong:
                     self.log(f"Throttled, trying again in 10 minutes. Keep the browser window open.", classes="text-orange")
@@ -619,18 +654,21 @@ class GoogleAIScraper:
                     self.check_for_captcha()
                     continue
 
+                url_divs = []
                 show_more_urls_button = ai_mode.find_elements(by=By.CSS_SELECTOR, value=sel["am_show_more_urls"])
                 if show_more_urls_button:
                     for show_more_url_button in show_more_urls_button:
                         try:
-                            self.wait.until(lambda _: show_more_url_button.is_displayed())
-                            if show_more_url_button.is_displayed():
-                                try:
-                                    show_more_url_button.click()
-                                except ElementNotInteractableException:
-                                    self.log("ERROR: Could not expand URL box, continuing anyway", classes="text-orange")
-                        except TimeoutException:
-                            self.log("ERROR: Could not expand URL box, continuing anyway", classes="text-orange")
+                            self.wait.until(lambda d: any(
+                                el.is_displayed() for el in
+                                d.find_elements(By.CSS_SELECTOR, sel["am_show_more_urls"])
+                            ))
+                            show_more_url_button.click()
+                            url_divs = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["am_url_divs"])
+                        except (TimeoutException, ElementNotInteractableException):
+                            url_divs = self.driver.find_elements(by=By.CSS_SELECTOR,
+                                                                 value=sel["am_url_divs_not_expandable"])
+                            self.log("Warning: Could not expand URL box, continuing anyway", classes="text-orange")
 
                 ai_mode_html = ai_mode.find_elements(by=By.CSS_SELECTOR, value=sel["am_answers"])
 
@@ -638,14 +676,24 @@ class GoogleAIScraper:
                     time.sleep(6)
                     ai_mode_html = ai_mode.find_elements(by=By.CSS_SELECTOR, value=sel["am_answers"])
 
-                ai_mode_html = ai_mode_html[0].get_attribute("outerHTML")
+                # Remove prompt box
+                prompt_input = self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_prompt_input"])
+                if prompt_input:
+                    self.driver.execute_script("""
+                                var element = arguments[0];
+                                element.parentNode.removeChild(element);
+                                """, prompt_input[0])
 
+                # Get text (with the inline source badge buttons removed)
+                ai_mode_html = self.html_without_source_buttons(ai_mode_html[0])
                 ai_mode_contents_md = md(ai_mode_html, strip=["a", "img"])
                 ai_mode_data["text"] = ai_mode_contents_md.split("\nAI-reac")[0]
 
-                urls = []
-                url_divs = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["am_url_box"])
+                # Get main claim
+                main_answer = self.driver.find_elements(by=By.CSS_SELECTOR, value=self.am_selectors["am_main_claim"])
+                ai_mode_data["main_answer"] = main_answer[0].text if main_answer else ""
 
+                urls = []
                 for url_div in url_divs:
                     url_div_a = url_div.find_element(by=By.CSS_SELECTOR, value="a")
                     url_div_url = url_div_a.get_attribute("href")
@@ -674,15 +722,22 @@ class GoogleAIScraper:
                     self.source_urls_to_scrape.add(url_div_url) # Add to queue
 
                 ai_mode_data["sources"] = urls
+
+                # Get claims
+                if self.scrape_claims:
+                    ai_mode_data["claims"] = self.get_claims(ai_mode_inner, mode="ai_mode")
+
                 ai_mode_data["not_available"] = False
                 break
 
         return ai_mode_data if ai_mode_data and ai_mode_data.get("text") else {}
 
 
-    def get_ai_overview_claims(self, ai_text_inner) -> list:
+    def get_claims(self, ai_text_inner, mode="ai_overview") -> list:
         """
-        Get the claims from an AI Overview.
+        Get the claims from an AI Overview or AI Mode.
+        This uses AI Overview selectors, which as of June 2026 are the same for
+        claims as AI Mode claims.
         Iterates badges in *reverse* order so each badge is scrolled to the top
         of the viewport, forcing the popup to open downward (never obscuring the
         next badge). Scrolling to the next badge naturally dismisses the current
@@ -693,65 +748,117 @@ class GoogleAIScraper:
         claims = []
         actions = ActionChains(self.driver)
 
-        all_badges = [
-            b for b in ai_text_inner.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_source_badge"])
-            if b.is_displayed()
-        ]
+        # AI Mode answers are often shorter than the viewport, so a badge near
+        # the bottom cannot be scrolled to the top (there is nothing below it to
+        # scroll up into). Add a viewport's worth of padding at the bottom so
+        # every badge can be brought to the top and its popup opens downward.
+        # Removed again in the finally-block so it doesn't affect screenshots.
+        if mode == "ai_mode":
+            self.driver.execute_script("document.body.style.paddingBottom = window.innerHeight + 'px';")
 
-        for link_badge in reversed(all_badges):
+        try:
+            all_badges = [
+                b for b in ai_text_inner.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_source_badge"])
+                if b.is_displayed()
+            ]
 
-            # Scroll badge to the TOP of the viewport so the popup opens downward,
-            # and so the scroll itself dismisses any previously open popup.
-            self.driver.execute_script("arguments[0].scrollIntoView({block: 'start'});", link_badge)
-            time.sleep(0.2)
+            for link_badge in reversed(all_badges):
 
-            # Hover over the badge to trigger the popup
-            actions.move_to_element(link_badge).perform()
-            time.sleep(0.4)
+                # Scroll badge to the TOP of the viewport so the popup opens downward,
+                # and so the scroll itself dismisses any previously open popup.
+                self.driver.execute_script("arguments[0].scrollIntoView({block: 'start'});", link_badge)
+                # AI Mode has a sticky header at the top of the page; block:'start'
+                # tucks the badge underneath it, so the hover lands on the header
+                # instead of the badge and no popup appears. Nudge the page up ~200px
+                # to bring the badge clear of the header.
+                if mode == "ai_mode":
+                    self.driver.execute_script("window.scrollBy(0, -200);")
+                time.sleep(0.2)
 
-            claim_text = ai_text_inner.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_claim"])
-            # Claim highlights do not always appear!
-            if not claim_text or not claim_text[0] or not claim_text[0].is_displayed() or not claim_text[0].text:
-                claim_text = ""
-            else:
-                # Skip button text in claim -- not easily filterable through CSS selector unfortunately
-                # Replace line 718-720 with:
-                claim_text_elements = claim_text[0].find_elements(By.XPATH, ".//*[not(ancestor-or-self::button)][not(*)]")
-                claim_text = " ".join([
-                    el.get_attribute("textContent").strip()
-                    for el in claim_text_elements
-                    if el.get_attribute("textContent").strip()
-                ])
+                # Hover over the badge to trigger the popup
+                actions.move_to_element(link_badge).perform()
+                time.sleep(0.4)
 
-            claim_sources = []
-            for source_box in self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_claim_url"]):
-                if source_box.is_displayed():
-                    claim_source = {}
-                    claim_source["title"] = source_box.find_element(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_title"]).text
-                    claim_url = source_box.find_element(by=By.CSS_SELECTOR, value="a").get_attribute("href")
-                    claim_source["url_id"] = hashlib.md5(claim_url.encode()).hexdigest()
-                    is_translated = "translate.google.com" in (claim_url or "")
-                    if is_translated:
-                        translated = self.parse_translate_url(claim_url)
-                        claim_source["url"] = translated["original_url"]
-                        claim_source["domain"] = translated["original_domain"]
-                        claim_source["is_translated"] = True
-                        claim_source["translated_url"] = claim_url
-                    else:
-                        claim_source["url"] = claim_url
-                        claim_source["domain"] = urlparse(claim_url).netloc
-                        claim_source["is_translated"] = False
-                    claim_source["description"] = source_box.find_element(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_description"]).text
-                    claim_sources.append(claim_source)
+                claim_text = ai_text_inner.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_claim"])
+                # Claim highlights do not always appear!
+                if not claim_text or not claim_text[0] or not claim_text[0].is_displayed() or not claim_text[0].text:
+                    claim_text = ""
+                else:
+                    # Collect the claim text, which is a bit obtuse since we need to remove button texts
+                    # but also be wary of stale elements).
+                    claim_text = self.driver.execute_script(
+                        """
+                        const root = arguments[0];
+                        const parts = [];
+                        root.querySelectorAll('*').forEach(el => {
+                            if (el.children.length === 0 && !el.closest('button')) {
+                                const text = el.textContent.trim();
+                                if (text) parts.push(text);
+                            }
+                        });
+                        return parts.join(' ');
+                        """,
+                        claim_text[0],
+                    )
 
-            claims.append({
-                "claim": claim_text,
-                "sources": claim_sources
-            })
+                claim_sources = []
+                for source_box in self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_claim_url"]):
+                    if source_box.is_displayed():
+                        claim_source = {}
+                        claim_source["title"] = source_box.find_element(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_title"]).text
+                        claim_url = source_box.find_element(by=By.CSS_SELECTOR, value="a").get_attribute("href")
+                        claim_source["url_id"] = hashlib.md5(claim_url.encode()).hexdigest()
+                        is_translated = "translate.google.com" in (claim_url or "")
+                        if is_translated:
+                            translated = self.parse_translate_url(claim_url)
+                            claim_source["url"] = translated["original_url"]
+                            claim_source["domain"] = translated["original_domain"]
+                            claim_source["is_translated"] = True
+                            claim_source["translated_url"] = claim_url
+                        else:
+                            claim_source["url"] = claim_url
+                            claim_source["domain"] = urlparse(claim_url).netloc
+                            claim_source["is_translated"] = False
+                        claim_source["description"] = source_box.find_element(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_description"]).text
+                        claim_sources.append(claim_source)
+
+                claims.append({
+                    "claim": claim_text,
+                    "sources": claim_sources
+                })
+        finally:
+            # Remove the temporary bottom padding added for AI Mode.
+            if mode == "ai_mode":
+                self.driver.execute_script("document.body.style.paddingBottom = '';")
+
+            # Move the pointer to the top-left corner of the viewport (a neutral,
+            # non-badge area) so the last badge's hover popup closes and does not
+            # linger in the saved HTML/screenshot taken afterwards.
+            dismiss = ActionChains(self.driver)
+            dismiss.w3c_actions.pointer_action.move_to_location(0, 0)
+            dismiss.perform()
+            time.sleep(0.3)
 
         # Reverse back to chronological (top-to-bottom) order
         claims.reverse()
         return claims
+
+    def html_without_source_buttons(self, element) -> str:
+        """Return the element's outerHTML with source-badge buttons removed.
+
+        AI Overview and AI Mode answers contain inline source badges rendered as
+        <button> elements. We strip them (on a clone, so the live page is
+        untouched) so their citation text does not end up in the saved answer
+        text -- the same buttons we skip when collecting claims.
+        """
+        return self.driver.execute_script(
+            """
+            const clone = arguments[0].cloneNode(true);
+            clone.querySelectorAll('button').forEach(b => b.remove());
+            return clone.outerHTML;
+            """,
+            element,
+        )
 
     def save_html(self, query=None, page_id=None, mode=None, output_dir="/html"):
         html_dir = self.output_dir + output_dir
@@ -771,6 +878,12 @@ class GoogleAIScraper:
         filename = self.get_page_str(query=query, page_id=page_id, mode=mode, suffix=".png")
 
         screenshot_location = f"{screenshots_dir}/{filename}"
+
+        # Always start from the very top before capturing. get_claims may leave
+        # the page scrolled down, which makes the sticky AI Mode header render
+        # mid-page and overlay the answer in the screenshot.
+        self.driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(0.3)
 
         if mode == "ai_overview":
             window_height = self.driver.execute_script("return document.documentElement.scrollHeight")
@@ -985,7 +1098,7 @@ class GUI:
             ui.image(os.path.join(base_path, 'assets', 'logo_cutout.png')).style('width: 75px; height: 75px; object-fit: cover; flex-shrink: 0;')
             with ui.row().classes('p-4 self-center items-baseline gap-3'):
                 ui.label('Kenniskrabber').classes('main-title')
-                ui.label('v0.6').classes('main-title version')
+                ui.label(f'v{APP_VERSION}').classes('main-title version')
 
         with ui.row().classes('w-full p-4 gap-4 items-stretch'):
             # LEFT COLUMN - SETTINGS
@@ -1060,11 +1173,13 @@ class GUI:
                         "ao_url_description_fallback": ("Source description (fallback)", "Fallback element for description"),
                     }
                     AM_SELECTOR_META = {
-                        "am_answers_container": ("Container", "Main AI Mode answers container element"),
+                        "am_container": ("Container", "Main AI Mode answers container element"),
                         "am_answers": ("Answers", "Element containing the AI Mode answer content"),
                         "am_processed_answer": ("Processed answer", "Element indicating the answer is fully generated"),
+                        "am_main_claim": ("Main answer", "Highlighted claim in the AI Overview"),
                         "am_show_more_urls": ("Show more URLs btn", "Button to expand the source URL list"),
-                        "am_url_box": ("URL items", "List items for source URLs"),
+                        "am_url_divs": ("Sources (expandable box)", "List items for sources after clicking 'Show more'"),
+                        "am_url_divs_not_expandable": ("Sources (not expandable)", "List items for sources without 'Show more' button"),
                         "am_url_description": ("URL description", "Element with the source description text"),
                         "am_something_went_wrong": ("Failed generation box", "Element indicating AI Mode failed to generate an answer, often due to throttling"),
                     }
@@ -1072,22 +1187,22 @@ class GUI:
                     with ui.expansion('CSS Selectors').classes('w-full'):
                         self.selector_toggle = ui.toggle(['AI Overview', 'AI Mode'], value='AI Overview').classes('w-full mb-2').props('spread no-wrap')
 
+                        # Inputs are created empty here and populated once the log
+                        # area exists, so load_selectors() can report its source.
                         self.ao_selector_inputs = {}
-                        ao_defaults = GoogleAIScraper.DEFAULT_AO_SELECTORS
                         with ui.column().classes('w-full gap-1').bind_visibility_from(self.selector_toggle, 'value', value='AI Overview'):
                             for key, (label, tooltip) in AO_SELECTOR_META.items():
                                 with ui.row().classes('w-full items-center gap-1'):
-                                    inp = ui.input(label, value=ao_defaults[key]).classes('flex-grow').props('dense')
+                                    inp = ui.input(label).classes('flex-grow').props('dense')
                                     with ui.icon('help_outline').classes('text-grey cursor-pointer'):
                                         ui.tooltip(tooltip)
                                     self.ao_selector_inputs[key] = inp
 
                         self.am_selector_inputs = {}
-                        am_defaults = GoogleAIScraper.DEFAULT_AM_SELECTORS
                         with ui.column().classes('w-full gap-1').bind_visibility_from(self.selector_toggle, 'value', value='AI Mode'):
                             for key, (label, tooltip) in AM_SELECTOR_META.items():
                                 with ui.row().classes('w-full items-center gap-1'):
-                                    inp = ui.input(label, value=am_defaults[key]).classes('flex-grow').props('dense')
+                                    inp = ui.input(label).classes('flex-grow').props('dense')
                                     with ui.icon('help_outline').classes('text-grey cursor-pointer'):
                                         ui.tooltip(tooltip)
                                     self.am_selector_inputs[key] = inp
@@ -1117,6 +1232,32 @@ class GUI:
 
         with ui.row().classes('footer-text w-full p-2 justify-center'):
             ui.html('<a href="https://deep-culture.org" target="_blank">Deep Culture</a> · <a href="https://digitalmethods.net" target="_blank">Digital Methods Initiative</a>').classes('text-xs footer-text')
+
+        self.ao_defaults, self.am_defaults = GoogleAIScraper.load_selectors(log=self.log_push)
+        for key, inp in self.ao_selector_inputs.items():
+            if key in self.ao_defaults:
+                inp.value = self.ao_defaults[key]
+        for key, inp in self.am_selector_inputs.items():
+            if key in self.am_defaults:
+                inp.value = self.am_defaults[key]
+
+        # Check for a newer release in the background and notify if one exists.
+        ui.timer(0.5, self.check_for_update, once=True)
+
+    async def check_for_update(self):
+        result = await run.io_bound(check_for_update)
+        if not result:
+            return
+        latest_version, url = result
+
+        with ui.dialog() as dialog, ui.card().classes('items-center gap-3'):
+            ui.label('Update available').classes('text-lg font-bold')
+            ui.label(f'A new version (v{latest_version}) is available. '
+                     f'You are running v{APP_VERSION}.').classes('text-center')
+            with ui.row().classes('gap-2'):
+                ui.button('Not now', on_click=dialog.close).props('flat')
+                ui.button('Download', on_click=lambda: webbrowser.open(url))
+        dialog.open()
 
     def update_progress(self, current, total):
         self.progress_label.set_text(f'Progress: {current}/{total}')
@@ -1174,8 +1315,8 @@ class GUI:
             scrape_claims=self.scrape_claims.value,
             scrape_sources=self.scrape_sources_cb.value,
             throttled_strings=self.throttle_strings.value,
-            ao_selectors={k: inp.value for k, inp in self.ao_selector_inputs.items()},
-            am_selectors={k: inp.value for k, inp in self.am_selector_inputs.items()},
+            ao_selectors={**self.ao_defaults, **{k: inp.value for k, inp in self.ao_selector_inputs.items()}},
+            am_selectors={**self.am_defaults, **{k: inp.value for k, inp in self.am_selector_inputs.items()}},
             progress_callback=self.update_progress,
             log_callback=self.log_push
         )

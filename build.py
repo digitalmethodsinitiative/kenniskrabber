@@ -18,6 +18,7 @@ subprocess.run([
     "--icon", icon_file,
     "--add-data", f"assets{separator}assets",
     "--add-data", f"README.md{separator}.",
+    "--add-data", f"css-selectors.json{separator}.",
     "--hidden-import", "nicegui",
     "--collect-all", "nicegui",
     "--collect-all", "markdownify",

@@ -1,6 +1,12 @@
+; Version is passed in from CI via ISCC /DMyAppVersion=<tag>. The fallback
+; below is only used for local/manual compiles.
+#ifndef MyAppVersion
+  #define MyAppVersion "0.0.0-dev"
+#endif
+
 [Setup]
 AppName=Kenniskrabber
-AppVersion=1.0.0
+AppVersion={#MyAppVersion}
 AppPublisher=Sal Hagen
 DefaultDirName={autopf}\Kenniskrabber
 DefaultGroupName=Kenniskrabber
