@@ -48,7 +48,7 @@ def get_default_output_dir(input_file=False):
 SELECTORS_GITHUB_URL = "https://raw.githubusercontent.com/digitalmethodsinitiative/kenniskrabber/master/css-selectors.json"
 LOCAL_SELECTORS_PATH = os.path.join(base_path, "css-selectors.json")
 
-APP_VERSION = "0.5"
+APP_VERSION = "0.8"
 RELEASES_API_URL = "https://api.github.com/repos/digitalmethodsinitiative/kenniskrabber/releases/latest"
 RELEASES_PAGE_URL = "https://github.com/digitalmethodsinitiative/kenniskrabber/releases/latest"
 
@@ -772,7 +772,7 @@ class GoogleAIScraper:
                 # instead of the badge and no popup appears. Nudge the page up ~200px
                 # to bring the badge clear of the header.
                 if mode == "ai_mode":
-                    self.driver.execute_script("window.scrollBy(0, -200);")
+                    self.driver.execute_script("window.scrollBy(0, -250);")
                 time.sleep(0.2)
 
                 # Hover over the badge to trigger the popup
@@ -819,7 +819,12 @@ class GoogleAIScraper:
                             claim_source["url"] = claim_url
                             claim_source["domain"] = urlparse(claim_url).netloc
                             claim_source["is_translated"] = False
-                        claim_source["description"] = source_box.find_element(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_description"]).text
+
+                        if mode == "ai_overview":
+                            claim_source["description"] = source_box.find_element(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_description"]).text
+                        elif mode == "ai_mode":
+                            claim_source["description"] = source_box.find_element(by=By.CSS_SELECTOR, value=self.am_selectors["am_url_description"]).text
+
                         claim_sources.append(claim_source)
 
                 claims.append({
