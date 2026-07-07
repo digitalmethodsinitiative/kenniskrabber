@@ -1,4 +1,4 @@
-# 🤔Kenniskrabber
+# 🤔Kenniskrabber: Collect Google AI Overview and AI Mode data
 <p align="center">
   <img width="250" height="400" alt="Kenniskrabber screenshot" style="border: 2px solid black;" src="assets/screenshot.png" />
 </p>
