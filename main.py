@@ -49,6 +49,8 @@ SELECTORS_GITHUB_URL = "https://raw.githubusercontent.com/digitalmethodsinitiati
 LOCAL_SELECTORS_PATH = os.path.join(base_path, "css-selectors.json")
 
 APP_VERSION = "0.81"
+# Run with --debug to skip the update check and always use the local css-selectors.json.
+DEBUG = "--debug" in sys.argv
 RELEASES_API_URL = "https://api.github.com/repos/digitalmethodsinitiative/kenniskrabber/releases/latest"
 RELEASES_PAGE_URL = "https://github.com/digitalmethodsinitiative/kenniskrabber/releases/latest"
 
@@ -135,13 +137,17 @@ class GoogleAIScraper:
         callback so it shows up in the user output log.
         """
         merged = None
-        try:
-            response = requests.get(SELECTORS_GITHUB_URL, timeout=5)
-            response.raise_for_status()
-            merged = response.json()
-            log("Loaded CSS selectors from GitHub.")
-        except Exception as e:
-            log(f"Could not fetch CSS selectors from GitHub ({e}); using local file.")
+        if DEBUG:
+            log("Debug mode: using local CSS selectors.")
+        else:
+            try:
+                response = requests.get(SELECTORS_GITHUB_URL, timeout=5)
+                response.raise_for_status()
+                merged = response.json()
+                log("Loaded CSS selectors from GitHub.")
+            except Exception as e:
+                log(f"Could not fetch CSS selectors from GitHub ({e}); using local file.")
+        if merged is None:
             with open(LOCAL_SELECTORS_PATH, "r", encoding="utf-8") as file:
                 merged = json.load(file)
 
@@ -830,10 +836,13 @@ class GoogleAIScraper:
                             claim_source["domain"] = urlparse(claim_url).netloc
                             claim_source["is_translated"] = False
 
+                        claim_source_descriptions = None
                         if mode == "ai_overview":
-                            claim_source["description"] = source_box.find_element(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_description"]).text
+                            claim_source_descriptions = source_box.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_description"])
                         elif mode == "ai_mode":
-                            claim_source["description"] = source_box.find_element(by=By.CSS_SELECTOR, value=self.am_selectors["am_url_description"]).text
+                            claim_source_descriptions = source_box.find_elements(by=By.CSS_SELECTOR, value=self.am_selectors["am_url_description"])
+
+                        claim_source["description"] = claim_source_descriptions[0].text if claim_source_descriptions else ""
 
                         claim_sources.append(claim_source)
 
@@ -1259,7 +1268,8 @@ class GUI:
                 inp.value = self.am_defaults[key]
 
         # Check for a newer release in the background and notify if one exists.
-        ui.timer(0.5, self.check_for_update, once=True)
+        if not DEBUG:
+            ui.timer(0.5, self.check_for_update, once=True)
 
     async def check_for_update(self):
         result = await run.io_bound(check_for_update)

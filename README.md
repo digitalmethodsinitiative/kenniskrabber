@@ -28,6 +28,7 @@ To start:
 ```bash
 python main.py
 ```
+Add `--debug` to always use the local css-selectors.json file and refrain from checking new app versions.
 
 ### As an app
 

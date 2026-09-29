@@ -24,7 +24,7 @@
     "am_url_divs": "div[dir][tabindex] ul > li",
     "am_url_divs_not_expandable": "ul > li[data-processed] > div[data-src-id]",
     "am_main_claim": "div > mark[jsuid][data-sfc-root]",
-    "am_url_description": ".vhJ6Pe",
+    "am_url_description": "span > span[data-crb-snippet-text='true']",
     "am_something_went_wrong": "div > p > i",
     "am_disclaimer": ".v4bSkd"
 }
