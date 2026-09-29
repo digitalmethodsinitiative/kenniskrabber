@@ -15,8 +15,9 @@
     "ao_url_title": "div[id]",
     "ao_url_description": "span[data-crb-snippet-text]",
     "ao_url_description_fallback": ".dMCttd",
+    "ao_disclaimer": "div > .DuQANe.MSJHRb",
     "am_container": "div[data-xid='aim-mars-turn-root']",
-    "am_inner_text": "div[data-streaming-container]",
+    "am_inner_text": "div[data-container-id='main-col']",
     "am_answers": "#aim-chrome-initial-inline-async-container div[data-container-id=main-col]",
     "am_processed_answer": "section #aim-chrome-initial-inline-async-container > div[data-processed=true] div.pWvJNd",
     "am_show_more_urls": "#rw0ISc",
@@ -24,5 +25,6 @@
     "am_url_divs_not_expandable": "ul > li[data-processed] > div[data-src-id]",
     "am_main_claim": "div > mark[jsuid][data-sfc-root]",
     "am_url_description": ".vhJ6Pe",
-    "am_something_went_wrong": "div > p > i"
+    "am_something_went_wrong": "div > p > i",
+    "am_disclaimer": ".v4bSkd"
 }

@@ -48,7 +48,7 @@ def get_default_output_dir(input_file=False):
 SELECTORS_GITHUB_URL = "https://raw.githubusercontent.com/digitalmethodsinitiative/kenniskrabber/master/css-selectors.json"
 LOCAL_SELECTORS_PATH = os.path.join(base_path, "css-selectors.json")
 
-APP_VERSION = "0.8"
+APP_VERSION = "0.81"
 RELEASES_API_URL = "https://api.github.com/repos/digitalmethodsinitiative/kenniskrabber/releases/latest"
 RELEASES_PAGE_URL = "https://github.com/digitalmethodsinitiative/kenniskrabber/releases/latest"
 
@@ -452,6 +452,7 @@ class GoogleAIScraper:
                     self.log("Warning: #folsrch-ghost still present after timeout, continuing anyway",
                              classes="text-orange")
 
+                # Answer data object
                 ai_overview_data = {
                     "mode": "ai_overview",
                     "id": page_id,
@@ -461,7 +462,10 @@ class GoogleAIScraper:
                     "timestamp_scraped_unix": int(datetime.timestamp(datetime.now())),
                     "not_available": False,
                     "text": "",
-                    "sources": []
+                    "main_answer": "",
+                    "claims": "",
+                    "sources": [],
+                    "disclaimer": ""
                 }
 
                 failed_elements = ai_overview.find_elements(by=By.CSS_SELECTOR, value=sel["ao_failed_elements"])
@@ -498,7 +502,7 @@ class GoogleAIScraper:
                     except (StaleElementReferenceException, ElementNotInteractableException, NoSuchElementException, ElementClickInterceptedException, IndexError):
                         self.driver.execute_script("window.scrollTo(0, 0);")
                         self.driver.execute_script("document.elementFromPoint(0, 0).click();")
-                        show_more_button = self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_show_more"])
+                        show_more_button = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_show_more"])
                         continue_notice = "trying again" if attempt < 2 else "skipping"
                         time.sleep(1)
 
@@ -515,7 +519,7 @@ class GoogleAIScraper:
                         time.sleep(0.5)
 
                 # Remove prompt box
-                prompt_input = self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_prompt_input"])
+                prompt_input = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_prompt_input"])
                 if prompt_input:
                     self.driver.execute_script("""
                                 var element = arguments[0];
@@ -528,7 +532,7 @@ class GoogleAIScraper:
                 ai_overview_data["text"] = ai_overview_contents_md
 
                 # Get highlighted answer
-                main_answer = self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_main_claim"])
+                main_answer = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_main_claim"])
                 ai_overview_data["main_answer"] = main_answer[0].text if main_answer else ""
 
                 # Get URLs
@@ -594,6 +598,13 @@ class GoogleAIScraper:
                 if self.scrape_claims:
                     ai_overview_data["claims"] = self.get_claims(ai_overview_inner[0])
 
+                # Get disclaimer at the bottom; at the moment one is visible, one is hidden
+                disclaimers = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_disclaimer"])
+                for disclaimer in disclaimers:
+                    if disclaimer and disclaimer.is_displayed():
+                        ai_overview_data["disclaimer"] = disclaimer.text
+                        break
+
                 # Reset stuff; scroll to top and click top left
                 self.driver.execute_script("window.scrollTo(0, 0);")
                 self.driver.execute_script("document.elementFromPoint(0, 0).click();")
@@ -633,7 +644,8 @@ class GoogleAIScraper:
                     "timestamp_scraped_unix": int(datetime.timestamp(datetime.now())),
                     "not_available": True,
                     "text": "",
-                    "sources": []
+                    "sources": [],
+                    "disclaimer": ""
                 }
 
                 throttled = None
@@ -722,6 +734,13 @@ class GoogleAIScraper:
                 # Get claims
                 if self.scrape_claims:
                     ai_mode_data["claims"] = self.get_claims(ai_mode_inner, mode="ai_mode")
+
+                # Get disclaimer
+                disclaimers = self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["am_disclaimer"])
+                for disclaimer in disclaimers:
+                    if disclaimer and disclaimer.is_displayed():
+                        ai_mode_data["disclaimer"] = disclaimer.text
+                        break
 
                 ai_mode_data["not_available"] = False
                 break
@@ -1167,6 +1186,7 @@ class GUI:
                         "ao_url_title": ("Source title", "Element containing the source title"),
                         "ao_url_description": ("Source description", "Element with the source description text"),
                         "ao_url_description_fallback": ("Source description (fallback)", "Fallback element for description"),
+                        "ao_disclaimer": ("Disclaimer", "Element containing the disclaimer text (e.g. 'AI can make mistakes')"),
                     }
                     AM_SELECTOR_META = {
                         "am_container": ("Container", "Main AI Mode answers container element"),
@@ -1178,6 +1198,7 @@ class GUI:
                         "am_url_divs_not_expandable": ("Sources (not expandable)", "List items for sources without 'Show more' button"),
                         "am_url_description": ("URL description", "Element with the source description text"),
                         "am_something_went_wrong": ("Failed generation box", "Element indicating AI Mode failed to generate an answer, often due to throttling"),
+                        "am_disclaimer": ("Disclaimer", "Element containing the disclaimer text (e.g. 'AI can make mistakes')"),
                     }
 
                     with ui.expansion('CSS Selectors').classes('w-full'):
