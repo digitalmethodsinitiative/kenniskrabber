@@ -1,6 +1,6 @@
 # 🤔Kenniskrabber
 <p align="center">
-  <img alt="Kenniskrabber screenshot" style="border: 2px solid black;" src="assets/screenshot.png" />
+  <img width="250" height="400" alt="Kenniskrabber screenshot" style="border: 2px solid black;" src="assets/screenshot.png" />
 </p>
 Kenniskrabber is a semi-automated tool to collect and analyze data from Google AI Overviews and AI Mode answers.
 
