@@ -48,7 +48,7 @@ def get_default_output_dir(input_file=False):
 SELECTORS_GITHUB_URL = "https://raw.githubusercontent.com/digitalmethodsinitiative/kenniskrabber/master/css-selectors.json"
 LOCAL_SELECTORS_PATH = os.path.join(base_path, "css-selectors.json")
 
-APP_VERSION = "0.81"
+APP_VERSION = "0.82"
 # Run with --debug to skip the update check and always use the local css-selectors.json.
 DEBUG = "--debug" in sys.argv
 RELEASES_API_URL = "https://api.github.com/repos/digitalmethodsinitiative/kenniskrabber/releases/latest"
