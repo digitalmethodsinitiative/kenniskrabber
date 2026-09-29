@@ -500,11 +500,7 @@ class GoogleAIScraper:
                         self.driver.execute_script("document.elementFromPoint(0, 0).click();")
                         show_more_button = self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_show_more"])
                         continue_notice = "trying again" if attempt < 2 else "skipping"
-                        self.log(f"Could not find the 'Show more' button, {continue_notice}",
-                                 classes="text-orange")
-                        time.sleep(2)
-                else:
-                    self.log("Failed to click 'Show more' button after 3 attempts, continuing anyway", classes="text-red")
+                        time.sleep(1)
 
                 # Get contents of AI Overview
                 ai_overview_inner = None
@@ -767,12 +763,7 @@ class GoogleAIScraper:
                 # Scroll badge to the TOP of the viewport so the popup opens downward,
                 # and so the scroll itself dismisses any previously open popup.
                 self.driver.execute_script("arguments[0].scrollIntoView({block: 'start'});", link_badge)
-                # AI Mode has a sticky header at the top of the page; block:'start'
-                # tucks the badge underneath it, so the hover lands on the header
-                # instead of the badge and no popup appears. Nudge the page up ~200px
-                # to bring the badge clear of the header.
-                if mode == "ai_mode":
-                    self.driver.execute_script("window.scrollBy(0, -250);")
+                self.driver.execute_script("window.scrollBy(0, -200);")
                 time.sleep(0.2)
 
                 # Hover over the badge to trigger the popup
