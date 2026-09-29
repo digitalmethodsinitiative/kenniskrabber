@@ -15,7 +15,7 @@
     "ao_url_title": "div[id]",
     "ao_url_description": "span[data-crb-snippet-text]",
     "ao_url_description_fallback": ".dMCttd",
-    "ao_disclaimer": "div > .DuQANe.MSJHRb",
+    "ao_disclaimer": "div:has(> a[href*=\"p=ai_overviews\"])",
     "am_container": "div[data-xid='aim-mars-turn-root']",
     "am_inner_text": "div[data-container-id='main-col']",
     "am_answers": "#aim-chrome-initial-inline-async-container div[data-container-id=main-col]",
@@ -26,5 +26,5 @@
     "am_main_claim": "div > mark[jsuid][data-sfc-root]",
     "am_url_description": "span > span[data-crb-snippet-text='true']",
     "am_something_went_wrong": "div > p > i",
-    "am_disclaimer": ".v4bSkd"
+    "am_disclaimer": "div:has(> a[href*=\"p=aimode\"])"
 }

@@ -742,7 +742,7 @@ class GoogleAIScraper:
                     ai_mode_data["claims"] = self.get_claims(ai_mode_inner, mode="ai_mode")
 
                 # Get disclaimer
-                disclaimers = self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["am_disclaimer"])
+                disclaimers = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["am_disclaimer"])
                 for disclaimer in disclaimers:
                     if disclaimer and disclaimer.is_displayed():
                         ai_mode_data["disclaimer"] = disclaimer.text
@@ -1304,6 +1304,10 @@ class GUI:
         self.log_clear()
         self.btn_open_folder.set_visibility(False)
         self.btn_prepare.disable()
+
+        if not (self.output_dir.value or "").strip():
+            self.output_dir.value = get_default_output_dir()
+            self.log_push(f"No output directory given; using default: {self.output_dir.value}")
 
         query_file = self.file_input.value
         if self.input_method.value == 'Insert queries':
