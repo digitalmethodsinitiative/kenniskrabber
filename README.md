@@ -56,14 +56,14 @@ Add `--debug` to always use the local css-selectors.json file and refrain from c
 2. Insert search queries. You can either:
    - Use `Insert queries` to paste newline-separated queries.
    - Use `Use query file` to point to an existing csv file with queries. Kenniskrabber will look for queries under a `query` column or either use the first column values. Existing columns will be added to the Kenniskrabber .csv and .json output file. This allowing you to cross-reference query categorizations and AI outputs.
-3. Choose whether you want to shuffle queries, extract claims (highlighted answers in the AI response), and the sources that are linked-to in each of the AI responses.
+3. Choose whether you want to shuffle queries, extract claims (highlighted answers in the AI response), and resolve obfuscated sources.
 4. Set an output location (default: `Documents/Kenniskrabber/scrapes/scrape_YYYY-MM-DD_HH-SS/`).
    - If you choose an existing folder, Kenniskrabber will append to the existing scrape and skip the queries it has already processed. Useful if things crash!
 5. Choose your scrape settings
    - Use a Firefox profile if you want to use Google Search with a specific user history.
    - You can change `Top level domain` to navigate to a specific Google domain (e.g., `google.de`).
    - `Offset` lets you skip the first n queries in your list.
-   - `Throttled text` is used to recognize when an AI response gets throttled. This happen at various moments (in our experience, after a few hundred queries). If you use Google Search in another language than English, change accordingly. 
+   - `Throttled text` is used to recognize when an AI response gets throttled. This happens at various moments (in our experience, after a few hundred queries). If you use Google Search in another language than English, change accordingly. 
    - If Kenniskrabber's default CSS selectors are not working, you can change them under `CSS selectors`.
    - This is also the moment to potentially start a VPN if geolocation is of the essence.
 6. Press `Prepare browser` to open Firefox. Kenniskrabber will open a browser window where you have to solve a CAPTCHA. Here you can also log in to a Google account, add extensions, or adjust anything else browser-related.
