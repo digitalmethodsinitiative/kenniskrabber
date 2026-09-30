@@ -14,7 +14,7 @@ import tempfile
 import shutil
 import requests
 from datetime import datetime, timedelta
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urljoin
 from markdownify import markdownify as md
 
 from selenium import webdriver
@@ -53,6 +53,7 @@ APP_VERSION = "0.82"
 DEBUG = "--debug" in sys.argv
 RELEASES_API_URL = "https://api.github.com/repos/digitalmethodsinitiative/kenniskrabber/releases/latest"
 RELEASES_PAGE_URL = "https://github.com/digitalmethodsinitiative/kenniskrabber/releases/latest"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0"
 
 def _version_tuple(tag):
     """Turn a version tag like 'v0.6' or '1.2.0' into a comparable int tuple."""
@@ -89,8 +90,8 @@ class GoogleAIScraper:
 
     def __init__(self, scrape_mode="both", base_url=None, profile="", iterate_queries=set(),
                  inserted_queries=None, query_file=None, results_file="", output_dir="", offset=0,
-                 shuffle_queries=False, scrape_claims=False, scrape_sources=False, throttled_strings=None,
-                 ao_selectors=None, am_selectors=None,
+                 shuffle_queries=False, scrape_claims=False, scrape_sources=False, follow_goto_links=True,
+                 throttled_strings=None, ao_selectors=None, am_selectors=None,
                  progress_callback=None, log_callback=None):
         self.scrape_mode = scrape_mode
         self.base_url = base_url if base_url else "https://www.google.com/"
@@ -104,6 +105,7 @@ class GoogleAIScraper:
         self.shuffle_queries = shuffle_queries
         self.scrape_claims = scrape_claims
         self.scrape_sources = scrape_sources
+        self.follow_goto_links = follow_goto_links
         self.offset = offset
         self.throttled_strings = [t_s.strip() for t_s in throttled_strings.split(",")] if throttled_strings else [
             "Try again later", "Something went wrong"]
@@ -117,6 +119,10 @@ class GoogleAIScraper:
         self.finished_ai_overview_queries = set()
         self.finished_ai_mode_queries = set()
         self.source_urls_to_scrape = set()
+        self.resolved_goto_links = {}  # Google /goto link -> actual URL (or None)
+        self.goto_notice_logged = False
+        self.http_session = requests.Session()
+        self.http_session.headers["User-Agent"] = USER_AGENT
         self.scrape_durations = deque(maxlen=20)
         self.query_extra_data = {}  # query_id -> dict of extra columns from query file
 
@@ -147,9 +153,9 @@ class GoogleAIScraper:
                 log("Loaded CSS selectors from GitHub.")
             except Exception as e:
                 log(f"Could not fetch CSS selectors from GitHub ({e}); using local file.")
-        if merged is None:
-            with open(LOCAL_SELECTORS_PATH, "r", encoding="utf-8") as file:
-                merged = json.load(file)
+        # Local selectors fill in keys the GitHub version doesn't have (yet)
+        with open(LOCAL_SELECTORS_PATH, "r", encoding="utf-8") as file:
+            merged = {**json.load(file), **(merged or {})}
 
         ao_selectors = {k: v for k, v in merged.items() if k.startswith("ao_")}
         am_selectors = {k: v for k, v in merged.items() if k.startswith("am_")}
@@ -157,8 +163,7 @@ class GoogleAIScraper:
 
     def get_driver(self, custom_profile=""):
         options = webdriver.FirefoxOptions()
-        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0"
-        options.add_argument(f'--user-agent={user_agent}')
+        options.add_argument(f'--user-agent={USER_AGENT}')
 
         if custom_profile:
             self.log(f"Copying custom profile {custom_profile}...")
@@ -541,7 +546,7 @@ class GoogleAIScraper:
                 main_answer = self.driver.find_elements(by=By.CSS_SELECTOR, value=sel["ao_main_claim"])
                 ai_overview_data["main_answer"] = main_answer[0].text if main_answer else ""
 
-                # Get URLs
+                # Get sources
                 urls = []
                 url_divs = []
                 carousel_divs = None
@@ -577,26 +582,13 @@ class GoogleAIScraper:
                         url_div_description += url_div.find_elements(by=By.CSS_SELECTOR, value=sel["ao_url_description_fallback"])
                         description = url_div_description[0].text if url_div_description else ""
 
-                        is_translated = "translate.google.com" in (url_div_url or "")
-                        if is_translated:
-                            translated = self.parse_translate_url(url_div_url)
-                            display_url = translated["original_url"]
-                            display_domain = translated["original_domain"]
-                        else:
-                            display_url = url_div_url
-                            display_domain = urlparse(url_div_url).netloc
-
                         url = {
                             "title": url_div_title,
                             "description": description,
-                            "domain": display_domain,
-                            "url": display_url,
-                            "is_translated": is_translated,
+                            **self.source_link_fields(url_div_url),
                         }
-                        if is_translated:
-                            url["translated_url"] = url_div_url
                         urls.append(url)
-                        self.source_urls_to_scrape.add(url_div_url) # Add to queue
+                        self.source_urls_to_scrape.add(url.get("translated_url") or url["url"]) # Add to queue
 
                 ai_overview_data["sources"] = urls
 
@@ -714,26 +706,13 @@ class GoogleAIScraper:
                     url_div_description = url_div.find_elements(by=By.CSS_SELECTOR, value=sel["am_url_description"])
                     description = url_div_description[0].text if url_div_description else ""
 
-                    is_translated = "translate.google.com" in (url_div_url or "")
-                    if is_translated:
-                        translated = self.parse_translate_url(url_div_url)
-                        display_url = translated["original_url"]
-                        display_domain = translated["original_domain"]
-                    else:
-                        display_url = url_div_url
-                        display_domain = urlparse(url_div_url).netloc
-
                     url = {
                         "title": url_div_a.get_attribute("aria-label"),
                         "description": description,
-                        "domain": display_domain,
-                        "url": display_url,
-                        "is_translated": is_translated,
+                        **self.source_link_fields(url_div_url),
                     }
-                    if is_translated:
-                        url["translated_url"] = url_div_url
                     urls.append(url)
-                    self.source_urls_to_scrape.add(url_div_url) # Add to queue
+                    self.source_urls_to_scrape.add(url.get("translated_url") or url["url"]) # Add to queue
 
                 ai_mode_data["sources"] = urls
 
@@ -824,17 +803,7 @@ class GoogleAIScraper:
                         claim_source["title"] = source_box.find_element(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_title"]).text
                         claim_url = source_box.find_element(by=By.CSS_SELECTOR, value="a").get_attribute("href")
                         claim_source["url_id"] = hashlib.md5(claim_url.encode()).hexdigest()
-                        is_translated = "translate.google.com" in (claim_url or "")
-                        if is_translated:
-                            translated = self.parse_translate_url(claim_url)
-                            claim_source["url"] = translated["original_url"]
-                            claim_source["domain"] = translated["original_domain"]
-                            claim_source["is_translated"] = True
-                            claim_source["translated_url"] = claim_url
-                        else:
-                            claim_source["url"] = claim_url
-                            claim_source["domain"] = urlparse(claim_url).netloc
-                            claim_source["is_translated"] = False
+                        claim_source.update(self.source_link_fields(claim_url))
 
                         claim_source_descriptions = None
                         if mode == "ai_overview":
@@ -1052,7 +1021,7 @@ class GoogleAIScraper:
         td = timedelta(seconds=remaining * avg_duration)
         total_minutes = td.seconds // 60
         hours, minutes = divmod(total_minutes, 60)
-        self.log(f"Processed in {duration:.2f}s (avg {avg_duration:.2f}s, {hours}h {minutes}m left")
+        self.log(f"Processed in {duration:.2f}s (avg {avg_duration:.2f}s, {hours}h {minutes}m left)")
 
     def get_page_str(self, query=None, page_id=None, mode=None, suffix=None):
         if query and page_id and mode:
@@ -1071,6 +1040,65 @@ class GoogleAIScraper:
             filename += suffix
         return filename
 
+
+    @staticmethod
+    def is_goto_link(url) -> bool:
+        """Whether a source link is an obfuscated Google redirect (https://www.google.xx/goto?url=...)."""
+        parsed = urlparse(url or "")
+        return parsed.path == "/goto" and re.fullmatch(r"(www\.)?google\.[a-z.]+", parsed.netloc) is not None
+
+    def resolve_goto_link(self, goto_url) -> Optional[str]:
+        """Return the URL a Google /goto link redirects to, or None if it can't be resolved.
+
+        Only reads the redirect's Location header; the target page itself isn't loaded.
+        """
+        if goto_url in self.resolved_goto_links:
+            return self.resolved_goto_links[goto_url]
+
+        resolved = None
+        try:
+            response = self.http_session.get(goto_url, allow_redirects=False, timeout=10)
+            location = response.headers.get("Location")
+            if response.is_redirect and location:
+                resolved = urljoin(goto_url, location)
+            else:
+                self.log(f"Could not follow source link (HTTP {response.status_code}): {goto_url}", classes="text-orange")
+        except requests.RequestException as e:
+            self.log(f"Could not follow source link ({e}): {goto_url}", classes="text-orange")
+
+        self.resolved_goto_links[goto_url] = resolved
+        return resolved
+
+    def source_link_fields(self, href) -> dict:
+        """Return the domain/url fields of a source, following Google /goto redirects if enabled,
+        and resolving translate links.."""
+        fields = {}
+        link = href or ""
+
+        if self.is_goto_link(link):
+            if self.follow_goto_links:
+                resolved = self.resolve_goto_link(link)
+                if resolved:
+                    fields["goto_url"] = link
+                    link = resolved
+            elif not self.goto_notice_logged:
+                self.log("Source links are obfuscated Google /goto redirects. Enable 'Follow obfuscated source links' to get the actual links.",
+                         classes="text-orange")
+                self.goto_notice_logged = True
+
+        is_translated = "translate.google.com" in link
+        if is_translated:
+            translated = self.parse_translate_url(link)
+            display_url = translated["original_url"]
+            display_domain = translated["original_domain"]
+        else:
+            display_url = link
+            display_domain = urlparse(link).netloc
+
+        link_fields = {"domain": display_domain, "url": display_url, "is_translated": is_translated}
+        if is_translated:
+            link_fields["translated_url"] = link
+        return {**link_fields, **fields}
 
     @staticmethod
     def parse_translate_url(url: str) -> dict:
@@ -1159,6 +1187,14 @@ class GUI:
                         self.scrape_sources_cb = ui.checkbox('Scrape sources')
                         with ui.icon('help_outline').classes('text-grey cursor-pointer'):
                             ui.tooltip('Extracts HTML and screenshots of all linked sources after collecting Google data.')
+
+                    with ui.row().classes('items-center gap-1'):
+                        self.follow_goto_cb = ui.checkbox('Follow obfuscated sources', value=True)
+                        with ui.icon('help_outline').classes('text-grey cursor-pointer'):
+                            ui.tooltip('Google may hide sources behind a redirect '
+                                       '(google.com/goto?url=...), so the actual URL and domain are not on the page. '
+                                       'When checked, these redirects are followed with a web request to get the '
+                                       'actual source link.')
 
                     default_output_folder = get_default_output_dir()
                     self.output_dir = ui.input('Output directory', value=default_output_folder).classes('full-width')
@@ -1345,6 +1381,7 @@ class GUI:
             offset=int(self.offset.value),
             scrape_claims=self.scrape_claims.value,
             scrape_sources=self.scrape_sources_cb.value,
+            follow_goto_links=self.follow_goto_cb.value,
             throttled_strings=self.throttle_strings.value,
             ao_selectors={**self.ao_defaults, **{k: inp.value for k, inp in self.ao_selector_inputs.items()}},
             am_selectors={**self.am_defaults, **{k: inp.value for k, inp in self.am_selector_inputs.items()}},
