@@ -13,9 +13,12 @@ While it does not circumvent any CAPTCHAs, Kenniskrabber does speed up the [mean
    - The sources, including their title, description, domain name, and URL.
    - The 'main answer' of the AI response (highlighted, bold text).
    - All the 'claims' (highlighted texts) in the AI answer and which sources these are linked to.
+   - The disclaimer at the bottom of the response.
 2. Full-page screenshots
 3. HTML snapshot and screenshots of the Google SERP and AI Mode answers
 4. HTML snapshot and screenshots of the linked-to sources.
+
+Interactive dialogues cannot be scraped at the moment.
 
 ## Installation
 ### As a Python script
