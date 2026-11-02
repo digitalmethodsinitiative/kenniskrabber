@@ -75,3 +75,5 @@ Don't panic, that happens! You can edit the relevant CSS selectors in the Kennis
 
 ## Credits & license
 Kenniskrabber is created by [Sal Hagen](https://salhagen.nl) as part of the [Deep Culture](https://deep-culture.org) project and [Digital Methods Initiative](https://digitalmethods.net).
+
+Kenniskrabber is licensed under the Mozilla Public License, 2.0. Refer to the LICENSE file for more information.
