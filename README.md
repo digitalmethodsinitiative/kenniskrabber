@@ -20,6 +20,8 @@ While it does not circumvent any CAPTCHAs, Kenniskrabber does speed up the [mean
 
 Interactive dialogues cannot be scraped at the moment.
 
+You can also tick `Bing` (Copilot Search) and/or `DuckDuckGo` (DuckAssist) to collect their AI answers in the same JSON/CSV, with the same fields (the `mode` column says which engine a row is from). Bing links each claim to its own sources. DuckDuckGo does not, so it returns one claim covering the whole answer with the full source list. Untick `Google` to collect only Bing and/or DuckDuckGo. Bing and DuckDuckGo are greyed out while Google is set to `AI Modes` or `AI Overviews & AI Modes`, since they only have an AI Overview-style answer; set the dropdown to `AI Overviews` to use them next to Google.
+
 ## Installation
 ### As a Python script
 You can run Kenniskrabber as a NiceGUI app through Python. Create and activate a [virtual environment](https://www.w3schools.com/python/python_virtualenv.asp) and run:
