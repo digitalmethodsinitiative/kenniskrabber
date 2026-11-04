@@ -1,4 +1,5 @@
 import json
+import base64
 import csv
 import os
 import hashlib
@@ -19,6 +20,7 @@ from markdownify import markdownify as md
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import WebDriverException, TimeoutException, ElementNotInteractableException, StaleElementReferenceException, NoSuchElementException, ElementClickInterceptedException
 from selenium.webdriver.support.wait import WebDriverWait
@@ -92,6 +94,7 @@ class GoogleAIScraper:
                  inserted_queries=None, query_file=None, results_file="", output_dir="", offset=0,
                  shuffle_queries=False, scrape_claims=False, scrape_sources=False, follow_goto_links=True,
                  throttled_strings=None, ao_selectors=None, am_selectors=None,
+                 bg_selectors=None, dk_selectors=None, scrape_bing=False, scrape_duckduckgo=False,
                  progress_callback=None, log_callback=None):
         self.scrape_mode = scrape_mode
         self.base_url = base_url if base_url else "https://www.google.com/"
@@ -111,6 +114,12 @@ class GoogleAIScraper:
             "Try again later", "Something went wrong"]
         self.ao_selectors = {**(ao_selectors or {})}
         self.am_selectors = {**(am_selectors or {})}
+        self.bg_selectors = {**(bg_selectors or {})}
+        self.dk_selectors = {**(dk_selectors or {})}
+        self.scrape_bing = scrape_bing
+        self.scrape_duckduckgo = scrape_duckduckgo
+        self.bing_base_url = "https://www.bing.com/"
+        self.duckduckgo_base_url = "https://duckduckgo.com/"
         self.progress_callback = progress_callback
         self.log_callback: Optional[Callable] = log_callback
         self.profile = profile
@@ -118,6 +127,8 @@ class GoogleAIScraper:
 
         self.finished_ai_overview_queries = set()
         self.finished_ai_mode_queries = set()
+        self.finished_bing_queries = set()
+        self.finished_duckduckgo_queries = set()
         self.source_urls_to_scrape = set()
         self.resolved_goto_links = {}  # Google /goto link -> actual URL (or None)
         self.goto_notice_logged = False
@@ -135,7 +146,7 @@ class GoogleAIScraper:
 
     @staticmethod
     def load_selectors(log=print):
-        """Return (ao_selectors, am_selectors) from the merged css-selectors.json.
+        """Return (ao_selectors, am_selectors, bg_selectors, dk_selectors) from the merged css-selectors.json.
 
         Prefers the latest version fetched from GitHub so selectors can be
         updated without shipping a new build; falls back to the bundled local
@@ -159,7 +170,9 @@ class GoogleAIScraper:
 
         ao_selectors = {k: v for k, v in merged.items() if k.startswith("ao_")}
         am_selectors = {k: v for k, v in merged.items() if k.startswith("am_")}
-        return ao_selectors, am_selectors
+        bg_selectors = {k: v for k, v in merged.items() if k.startswith("bg_")}
+        dk_selectors = {k: v for k, v in merged.items() if k.startswith("dk_")}
+        return ao_selectors, am_selectors, bg_selectors, dk_selectors
 
     def get_driver(self, custom_profile=""):
         options = webdriver.FirefoxOptions()
@@ -213,6 +226,11 @@ class GoogleAIScraper:
         return driver
 
     def prepare(self):
+        google_on = self.scrape_mode in ["ai_overviews_&_ai_modes", "ai_overviews", "ai_modes"]
+        if not google_on and not self.scrape_bing and not self.scrape_duckduckgo:
+            self.log("Nothing selected to collect. Tick Google, Bing and/or DuckDuckGo.", classes="text-red")
+            return False
+
         # Get queries
         n_urls = 0
         self.log("Getting queries")
@@ -286,6 +304,10 @@ class GoogleAIScraper:
                                 self.finished_ai_overview_queries.add(finished_query["id"])
                             if finished_query.get("mode") == "ai_mode":
                                 self.finished_ai_mode_queries.add(finished_query["id"])
+                            if finished_query.get("mode") == "bing":
+                                self.finished_bing_queries.add(finished_query["id"])
+                            if finished_query.get("mode") == "duckduckgo":
+                                self.finished_duckduckgo_queries.add(finished_query["id"])
                         except Exception as parse_err:
                             self.log(f"Warning: could not parse results line: {parse_err}", classes="text-orange")
                 self.log(f"Already collected {len(self.finished_ai_overview_queries)} AI Overviews and {len(self.finished_ai_mode_queries)} AI Modes", classes="text-orange")
@@ -372,6 +394,12 @@ class GoogleAIScraper:
                     else:
                         self.log("Already scraped AI Mode data, skipping", classes="text-orange")
 
+                # Bing (Copilot Search) and DuckDuckGo (DuckAssist)
+                if self.scrape_bing:
+                    self.scrape_extra_engine("bing", page_id, query, count)
+                if self.scrape_duckduckgo:
+                    self.scrape_extra_engine("duckduckgo", page_id, query, count)
+
             # JSON to CSV Conversion
             if self.is_running and self.results_file:
                 self.log("Converting results JSON to csv")
@@ -380,7 +408,7 @@ class GoogleAIScraper:
                 if write_mode == "a":
                     self.log("Results CSV already exists, appending")
                 with open(self.results_file, "r", encoding="utf-8") as in_json:
-                    with open(csv_filename, write_mode, encoding="utf-8", newline="") as out_csv:
+                    with open(csv_filename, write_mode, encoding="utf-8-sig", newline="") as out_csv:
                         write_header = True if write_mode == "w" else False
                         writer = None # Pre-define writer
                         all_lines = [json.loads(line) for line in in_json.readlines() if line.strip()]
@@ -399,6 +427,8 @@ class GoogleAIScraper:
 
                             for csv_line in all_lines:
                                 csv_line["sources"] = self.source_to_string(csv_line["sources"]) if csv_line.get("sources") else ""
+                                if "claims" in csv_line:
+                                    csv_line["claims"] = self.claims_to_string(csv_line["claims"])
                                 writer.writerow(csv_line)
 
                 self.log("Google scraping completed.", classes="text-blue")
@@ -733,6 +763,303 @@ class GoogleAIScraper:
         return ai_mode_data if ai_mode_data and ai_mode_data.get("text") else {}
 
 
+    def scrape_extra_engine(self, engine, page_id, query, count):
+        """Scrape one query on Bing or DuckDuckGo; same flow as the Google blocks in process()."""
+        finished = self.finished_bing_queries if engine == "bing" else self.finished_duckduckgo_queries
+        if page_id in finished:
+            self.log(f"Already scraped {engine} data, skipping", classes="text-orange")
+            return
+
+        start = time.time()
+        try:
+            if engine == "bing":
+                self.search_bing(query)
+                result = self.parse_bing_answer(page_id, query)
+            else:
+                self.open_page(f"{self.duckduckgo_base_url}?q={self.get_url_string(query)}")
+                result = self.parse_duckduckgo_answer(page_id, query)
+        except Exception as e:
+            self.log(f"Error scraping {engine} for '{query}': {e}", classes="text-red")
+            result = {}
+
+        if result:
+            # Merge extra query file columns (skip clashing keys)
+            for k, v in self.query_extra_data.get(page_id, {}).items():
+                if k not in result:
+                    result[k] = v
+            self.log(f"Parsed {engine} answer for: {query}", classes="text-blue")
+            with open(self.results_file, "a", encoding="utf-8") as out_file:
+                out_file.write(json.dumps(result) + "\n")
+        else:
+            self.log(f"No {engine} answer found for: {query}", classes="text-orange")
+
+        self.save_html(query=query, page_id=page_id, mode=engine)
+        self.save_screenshot(query=query, page_id=page_id, mode=engine)
+        finished.add(page_id)
+        self.print_elapsed_time(start, len(self.iterate_queries), count)
+
+    def wait_for_page_ready(self, timeout=10):
+        """Poll document.readyState instead of a flat sleep."""
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                if self.driver.execute_script("return document.readyState") == "complete":
+                    return
+            except Exception:
+                pass
+            time.sleep(0.2)
+
+    def search_bing(self, query):
+        """Type the query into bing.com's homepage search box, like a person would.
+        Falls back to a direct search URL if the box can't be found or used."""
+        sel = self.bg_selectors
+        self.open_page(self.bing_base_url)
+        self.check_for_generic_captcha()
+
+        try:
+            search_box = self.driver.find_element(By.CSS_SELECTOR, sel["bg_search_box"])
+            search_box.click()
+            search_box.clear()
+            search_box.send_keys(query)
+            time.sleep(0.3)
+            search_box.send_keys(Keys.ENTER)
+            self.wait_for_page_ready()
+            self.check_for_generic_captcha()
+        except (NoSuchElementException, ElementNotInteractableException, ElementClickInterceptedException) as e:
+            self.log(f"Couldn't use Bing's homepage search box ({e}); falling back to a direct search URL.", classes="text-orange")
+            self.open_page(f"{self.bing_base_url}search?q={self.get_url_string(query)}")
+
+    def parse_bing_answer(self, page_id, query) -> dict:
+        """Bing's AI answer (Copilot Search). Each claim's citations are plain inline
+        <a class="md_citlink"> links inside the claim's own <li>/<p>, so no hovering is needed.
+        The real URL is base64-encoded in the redirect link's `u=` parameter."""
+        sel = self.bg_selectors
+        time.sleep(1)
+
+        # Copilot Search streams in after the page loads, so poll for a few seconds
+        container = mdroot = None
+        for _ in range(6):
+            container_els = self.driver.find_elements(By.CSS_SELECTOR, sel["bg_container"])
+            if container_els and container_els[0].is_displayed():
+                mdroot_els = container_els[0].find_elements(By.CSS_SELECTOR, sel["bg_mdroot"])
+                if mdroot_els:
+                    container, mdroot = container_els[0], mdroot_els[0]
+                    break
+            time.sleep(0.5)
+        if container is None or mdroot is None:
+            return {}
+
+        bing_data = {
+            "mode": "bing",
+            "id": page_id,
+            "from_url": self.driver.current_url,
+            "query": query,
+            "timestamp_scraped": datetime.now().isoformat(),
+            "timestamp_scraped_unix": int(datetime.timestamp(datetime.now())),
+            "not_available": False,
+            "text": "",
+            "main_answer": "",
+            "claims": "",
+            "sources": [],
+            "disclaimer": ""
+        }
+
+        # References list at the bottom: full title and display URL per numbered citation
+        citation_map = {}
+        cit_root = container.find_elements(By.CSS_SELECTOR, sel["bg_cit_root"])
+        if cit_root:
+            for cit in cit_root[0].find_elements(By.CSS_SELECTOR, sel["bg_cit_item"]):
+                num = cit.get_attribute("data-citation-num")
+                if not num:
+                    continue
+                try:
+                    href = cit.find_element(By.CSS_SELECTOR, "a").get_attribute("href")
+                except Exception:
+                    href = None
+                title_el = cit.find_elements(By.CSS_SELECTOR, sel["bg_cit_title"])
+                site_el = cit.find_elements(By.CSS_SELECTOR, sel["bg_cit_site"])
+                url_el = cit.find_elements(By.CSS_SELECTOR, sel["bg_cit_url"])
+                citation_map[num] = {
+                    "title": title_el[0].text if title_el else (site_el[0].text if site_el else ""),
+                    "href": href,
+                    "display_url": url_el[0].text if url_el else "",  # fallback if decoding fails
+                }
+
+        answer_html = self.html_without_citation_links(mdroot)
+        bing_data["text"] = md(answer_html, strip=["a", "img"]).strip()
+
+        headings = mdroot.find_elements(By.CSS_SELECTOR, sel["bg_main_heading"])
+        bing_data["main_answer"] = headings[0].text if headings else ""
+
+        claims = self.get_bing_claims(mdroot, citation_map)
+
+        # Top-level sources: every unique reference the answer cites
+        seen_hrefs = set()
+        for claim in claims:
+            for src in claim["sources"]:
+                href = src.pop("_href", None)
+                if href and href not in seen_hrefs:
+                    seen_hrefs.add(href)
+                    bing_data["sources"].append(dict(src))
+                    self.source_urls_to_scrape.add(src.get("translated_url") or src["url"])  # Add to queue
+
+        if self.scrape_claims:
+            bing_data["claims"] = claims
+
+        # The disclaimer tooltip is hidden in the DOM, so read textContent instead of .text
+        disclaimer_els = container.find_elements(By.CSS_SELECTOR, sel["bg_disclaimer"])
+        if disclaimer_els:
+            bing_data["disclaimer"] = (self.driver.execute_script(
+                "return arguments[0].textContent;", disclaimer_els[0]
+            ) or "").strip()
+
+        # Bing clips the answer box visually; expand it so the screenshot shows the full answer
+        show_more = self.driver.find_elements(By.CSS_SELECTOR, sel["bg_show_more"])
+        if show_more and show_more[0].is_displayed():
+            try:
+                show_more[0].click()
+                time.sleep(0.3)
+            except Exception:
+                pass
+
+        self.driver.execute_script("window.scrollTo(0, 0);")
+        return bing_data
+
+    def get_bing_claims(self, mdroot, citation_map) -> list:
+        """One claim per <li>/<p> in the answer: its text (citation links stripped) plus the
+        reference(s) its inline <a data-sups="N"> links point at. Uncited claims get no sources."""
+        sel = self.bg_selectors
+        claims = []
+        for item in mdroot.find_elements(By.CSS_SELECTOR, sel["bg_claim_items"]):
+            if not item.is_displayed():
+                continue
+
+            claim_sources = []
+            seen_nums = set()
+            for link in item.find_elements(By.CSS_SELECTOR, sel["bg_citlink"]):
+                num = link.get_attribute("data-sups")
+                if not num or num in seen_nums:
+                    continue
+                seen_nums.add(num)
+                ref = citation_map.get(num, {})
+                href = ref.get("href")
+                decoded_url = self.decode_bing_redirect_url(href) if href else ""
+                final_url = decoded_url or ref.get("display_url") or href or ""
+                claim_sources.append({
+                    "title": ref.get("title") or (link.get_attribute("aria-label") or "").removeprefix("Sources: "),
+                    "description": "",
+                    "url_id": hashlib.md5(final_url.encode()).hexdigest(),
+                    **self.source_link_fields(final_url),
+                    "_href": final_url,
+                })
+
+            claim_text = self.html_without_citation_links(item, return_text=True)
+            if not claim_text:
+                continue
+            claims.append({"claim": claim_text, "sources": claim_sources})
+
+        return claims
+
+    def html_without_citation_links(self, element, return_text=False):
+        """Return an element's outerHTML (or plain textContent) from a clone with Bing's inline
+        citation links (<a class="md_citlink">) removed, so site names don't leak into the text."""
+        return self.driver.execute_script(
+            """
+            const clone = arguments[0].cloneNode(true);
+            clone.querySelectorAll(arguments[1]).forEach(a => a.remove());
+            return arguments[2] ? clone.textContent.replace(/\\s+/g, ' ').trim() : clone.outerHTML;
+            """,
+            element,
+            self.bg_selectors["bg_citlink"],
+            return_text,
+        )
+
+    @staticmethod
+    def decode_bing_redirect_url(href) -> str:
+        """Decode the real URL from a bing.com/ck/a redirect (base64 in the `u=` parameter,
+        after a 2-char prefix). Returns the href unchanged if it can't be decoded."""
+        if not href:
+            return ""
+        try:
+            payload = parse_qs(urlparse(href).query).get("u", [None])[0]
+            if not payload:
+                return href
+            stripped = payload[2:]  # drop the fixed 2-char prefix (e.g. "a1")
+            padded = stripped + "=" * (-len(stripped) % 4)
+            return base64.urlsafe_b64decode(padded).decode("utf-8")
+        except Exception:
+            return href
+
+    def parse_duckduckgo_answer(self, page_id, query) -> dict:
+        """DuckDuckGo's DuckAssist: one answer (one or more <p>) and ONE shared list of source
+        links, with no markup tying a source to a sentence. So 'claims' is a single entry
+        covering the whole answer, paired with the full source list."""
+        sel = self.dk_selectors
+        time.sleep(1)
+
+        container = None
+        for _ in range(6):
+            container_els = self.driver.find_elements(By.CSS_SELECTOR, sel["dk_container"])
+            if container_els and container_els[0].is_displayed():
+                container = container_els[0]
+                break
+            time.sleep(0.5)
+        if container is None:
+            return {}
+
+        ddg_data = {
+            "mode": "duckduckgo",
+            "id": page_id,
+            "from_url": self.driver.current_url,
+            "query": query,
+            "timestamp_scraped": datetime.now().isoformat(),
+            "timestamp_scraped_unix": int(datetime.timestamp(datetime.now())),
+            "not_available": False,
+            "text": "",
+            "main_answer": "",
+            "claims": "",
+            "sources": [],
+            "disclaimer": ""
+        }
+
+        paragraphs = [p for p in container.find_elements(By.CSS_SELECTOR, sel["dk_paragraphs"]) if p.is_displayed()]
+        answer_text = "\n\n".join(p.text for p in paragraphs if p.text).strip()
+        ddg_data["text"] = answer_text
+
+        main_strong = container.find_elements(By.CSS_SELECTOR, sel["dk_main_strong"])
+        if main_strong:
+            ddg_data["main_answer"] = main_strong[0].text
+        elif paragraphs:
+            ddg_data["main_answer"] = paragraphs[0].text  # no bold lead-in: use the first paragraph
+
+        sources = []
+        for a_el in container.find_elements(By.CSS_SELECTOR, sel["dk_source_links"]):
+            if not a_el.is_displayed():
+                continue
+            href = a_el.get_attribute("href")
+            if not href:
+                continue
+            sources.append({
+                "title": a_el.text.strip(),
+                "description": "",
+                "url_id": hashlib.md5(href.encode()).hexdigest(),
+                **self.source_link_fields(href),
+            })
+            self.source_urls_to_scrape.add(sources[-1].get("translated_url") or sources[-1]["url"])  # Add to queue
+        ddg_data["sources"] = sources
+
+        if self.scrape_claims and answer_text:
+            ddg_data["claims"] = [{"claim": answer_text, "sources": sources}]
+
+        disclaimers = self.driver.find_elements(By.CSS_SELECTOR, sel["dk_disclaimer"])
+        for disclaimer in disclaimers:
+            if disclaimer.is_displayed():
+                ddg_data["disclaimer"] = disclaimer.text
+                break
+
+        self.driver.execute_script("window.scrollTo(0, 0);")
+        return ddg_data
+
     def get_claims(self, ai_text_inner, mode="ai_overview") -> list:
         """
         Get the claims from an AI Overview or AI Mode.
@@ -761,64 +1088,87 @@ class GoogleAIScraper:
                 b for b in ai_text_inner.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_source_badge"])
                 if b.is_displayed()
             ]
+            if not all_badges:
+                self.log("No source badges found, so no claims can be extracted (check the 'Source badge' selector).", classes="text-orange")
 
             for link_badge in reversed(all_badges):
+                try:
+                    # Scroll badge to the TOP of the viewport so the popup opens downward,
+                    # and so the scroll itself dismisses any previously open popup.
+                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'start'});", link_badge)
+                    self.driver.execute_script("window.scrollBy(0, -200);")
+                    time.sleep(0.2)
 
-                # Scroll badge to the TOP of the viewport so the popup opens downward,
-                # and so the scroll itself dismisses any previously open popup.
-                self.driver.execute_script("arguments[0].scrollIntoView({block: 'start'});", link_badge)
-                self.driver.execute_script("window.scrollBy(0, -200);")
-                time.sleep(0.2)
+                    # Hover over the badge to trigger the popup
+                    actions.move_to_element(link_badge).perform()
+                    time.sleep(0.4)
 
-                # Hover over the badge to trigger the popup
-                actions.move_to_element(link_badge).perform()
-                time.sleep(0.4)
-
-                claim_text = ai_text_inner.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_claim"])
-                # Claim highlights do not always appear!
-                if not claim_text or not claim_text[0] or not claim_text[0].is_displayed() or not claim_text[0].text:
-                    claim_text = ""
-                else:
-                    # Collect the claim text, which is a bit obtuse since we need to remove button texts
-                    # but also be wary of stale elements).
+                    # Read this badge's own claim by walking up the DOM from the exact badge
+                    # we just hovered (no reliance on a "currently highlighted" selector).
                     claim_text = self.driver.execute_script(
                         """
-                        const root = arguments[0];
-                        const parts = [];
-                        root.querySelectorAll('*').forEach(el => {
-                            if (el.children.length === 0 && !el.closest('button')) {
-                                const text = el.textContent.trim();
-                                if (text) parts.push(text);
+                        const badge = arguments[0];
+                        const scopeRoot = arguments[1];
+
+                        // Prefer the enclosing <li> (the boundary of a bulleted claim),
+                        // bounded to the AI answer so we never climb into unrelated page <li>s.
+                        let root = badge.closest('li');
+                        if (root && !scopeRoot.contains(root)) {
+                            root = null;
+                        }
+
+                        if (!root) {
+                            // No enclosing <li>: this is the lead-in sentence. Fall back to the
+                            // nearest ancestor carrying Google's per-segment data-hveid,
+                            // starting from the badge's PARENT (the badge itself also has one).
+                            root = badge.parentElement;
+                            while (root && !root.hasAttribute('data-hveid')) {
+                                root = root.parentElement;
                             }
-                        });
-                        return parts.join(' ');
+                        }
+                        if (!root) return '';
+
+                        // textContent (not leaf elements) so bare text nodes are included;
+                        // strip the citation buttons from a clone so their labels don't leak in.
+                        const clone = root.cloneNode(true);
+                        clone.querySelectorAll('button').forEach(b => b.remove());
+                        return clone.textContent.replace(/\\s+/g, ' ').trim();
                         """,
-                        claim_text[0],
+                        link_badge,
+                        ai_text_inner,
                     )
 
-                claim_sources = []
-                for source_box in self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_claim_url"]):
-                    if source_box.is_displayed():
-                        claim_source = {}
-                        claim_source["title"] = source_box.find_element(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_title"]).text
-                        claim_url = source_box.find_element(by=By.CSS_SELECTOR, value="a").get_attribute("href")
-                        claim_source["url_id"] = hashlib.md5(claim_url.encode()).hexdigest()
-                        claim_source.update(self.source_link_fields(claim_url))
+                    claim_sources = []
+                    for source_box in self.driver.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_claim_url"]):
+                        if not source_box.is_displayed():
+                            continue
+                        try:
+                            claim_source = {}
+                            title_el = source_box.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_title"])
+                            claim_source["title"] = title_el[0].text if title_el else ""
+                            claim_url = source_box.find_element(by=By.CSS_SELECTOR, value="a").get_attribute("href")
+                            claim_source["url_id"] = hashlib.md5((claim_url or "").encode()).hexdigest()
+                            claim_source.update(self.source_link_fields(claim_url))
 
-                        claim_source_descriptions = None
-                        if mode == "ai_overview":
-                            claim_source_descriptions = source_box.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_description"])
-                        elif mode == "ai_mode":
-                            claim_source_descriptions = source_box.find_elements(by=By.CSS_SELECTOR, value=self.am_selectors["am_url_description"])
+                            claim_source_descriptions = None
+                            if mode == "ai_overview":
+                                claim_source_descriptions = source_box.find_elements(by=By.CSS_SELECTOR, value=self.ao_selectors["ao_url_description"])
+                            elif mode == "ai_mode":
+                                claim_source_descriptions = source_box.find_elements(by=By.CSS_SELECTOR, value=self.am_selectors["am_url_description"])
 
-                        claim_source["description"] = claim_source_descriptions[0].text if claim_source_descriptions else ""
+                            claim_source["description"] = claim_source_descriptions[0].text if claim_source_descriptions else ""
 
-                        claim_sources.append(claim_source)
+                            claim_sources.append(claim_source)
+                        except Exception:
+                            continue
 
-                claims.append({
-                    "claim": claim_text,
-                    "sources": claim_sources
-                })
+                    claims.append({
+                        "claim": claim_text,
+                        "sources": claim_sources
+                    })
+                except Exception as e:
+                    self.log(f"(skipped one badge: {e})", classes="text-orange")
+                    continue
         finally:
             # Remove the temporary bottom padding added for AI Mode.
             if mode == "ai_mode":
@@ -1114,6 +1464,19 @@ class GoogleAIScraper:
         return {"original_url": url, "original_domain": urlparse(url).netloc}
 
     @staticmethod
+    def format_claim(c) -> str:
+        src_str = "; ".join(
+            f"{s.get('title', '')} ({s.get('url', '')})" for s in c.get("sources", [])
+        )
+        return f"{c.get('claim', '')} [{src_str}]"
+
+    @classmethod
+    def claims_to_string(cls, claims) -> str:
+        if not claims:
+            return ""
+        return "\n".join(cls.format_claim(c) for c in claims)
+
+    @staticmethod
     def source_to_string(sources) -> str:
         source_string = []
         for source in sources:
@@ -1158,10 +1521,22 @@ class GUI:
                 with ui.card().classes('w-full'):
                     ui.label('What to collect').classes('card-title text-xl mb-2')
 
+                    with ui.row().classes('items-center gap-4'):
+                        self.google_cb = ui.checkbox('Google', value=True)
+                        self.scrape_bing_cb = ui.checkbox('Bing (Copilot Search)')
+                        self.scrape_duckduckgo_cb = ui.checkbox('DuckDuckGo (DuckAssist)')
+
                     self.mode = ui.select(
                         ['AI Overviews & AI Modes', 'AI Overviews', 'AI Modes'],
-                        value='AI Overviews & AI Modes'
-                    ).classes('w-full')
+                        value='AI Overviews & AI Modes',
+                        label='Google'
+                    ).classes('w-full').bind_enabled_from(self.google_cb, 'value')
+
+                    # Bing and DuckDuckGo only have an AI Overview-style answer, so they are
+                    # only available when Google is set to 'AI Overviews' (or Google is off).
+                    self.google_cb.on_value_change(self.update_engine_options)
+                    self.mode.on_value_change(self.update_engine_options)
+                    self.update_engine_options()
 
                     self.input_method = ui.radio([self.label_insert, self.label_queryfile], value=self.label_insert).props('inline')
 
@@ -1222,7 +1597,6 @@ class GUI:
                         "ao_inner_text": ("Inner text", "Element containing the AI Overview inner text"),
                         "ao_source_badge": ("Source badge", "Source badge within the AI Overview"),
                         "ao_main_claim": ("Main answer", "Highlighted claim in the AI Overview"),
-                        "ao_claim": ("Claims", "Highlighted claims after hovering over a source badge"),
                         "ao_claim_url": ("Claim source box", "Source box in pop-up that opens after hovering over a source badge."),
                         "ao_show_more_urls": ("Show more URLs button", "Button to expand the source URL list"),
                         "ao_url_divs": ("Sources (expandable box)", "List items for sources after clicking 'Show more'"),
@@ -1246,8 +1620,31 @@ class GUI:
                         "am_disclaimer": ("Disclaimer", "Element containing the disclaimer text (e.g. 'AI can make mistakes')"),
                     }
 
+                    BG_SELECTOR_META = {
+                        "bg_container": ("Container", "Main Bing Copilot Search answer container"),
+                        "bg_mdroot": ("Answer root", "Element holding the rendered answer markdown (headings/lists/paragraphs)"),
+                        "bg_claim_items": ("Claim items", "The list items / paragraphs that count as one claim each"),
+                        "bg_citlink": ("Citation link", "Inline citation link inside a claim, pointing at one reference"),
+                        "bg_cit_root": ("References root", "Container for the References list at the bottom of the answer"),
+                        "bg_cit_item": ("Reference item", "One entry in the References list"),
+                        "bg_cit_title": ("Reference title", "Element with a reference's page title"),
+                        "bg_cit_site": ("Reference site", "Element with a reference's site name"),
+                        "bg_cit_url": ("Reference URL", "Element with a reference's plain display URL"),
+                        "bg_main_heading": ("Main answer heading", "The heading level that wraps the top-line summary answer"),
+                        "bg_search_box": ("Homepage search box", "The query input on bing.com's homepage, used to type the search in"),
+                        "bg_show_more": ("Show more button", "Button to expand the visually clipped answer box before the screenshot"),
+                        "bg_disclaimer": ("Disclaimer", "The 'This summary was generated by AI...' tooltip text"),
+                    }
+                    DK_SELECTOR_META = {
+                        "dk_container": ("Container", "Main DuckAssist answer container"),
+                        "dk_paragraphs": ("Paragraphs", "The <p> elements making up the answer text"),
+                        "dk_main_strong": ("Main answer (bold lead-in)", "The bolded lead-in phrase used as the main answer"),
+                        "dk_source_links": ("Source links", "Links in the shared source list below the answer"),
+                        "dk_disclaimer": ("Disclaimer", "Element with the 'Auto-generated...' disclaimer text"),
+                    }
+
                     with ui.expansion('CSS Selectors').classes('w-full'):
-                        self.selector_toggle = ui.toggle(['AI Overview', 'AI Mode'], value='AI Overview').classes('w-full mb-2').props('spread no-wrap')
+                        self.selector_toggle = ui.toggle(['AI Overview', 'AI Mode', 'Bing', 'DuckDuckGo'], value='AI Overview').classes('w-full mb-2').props('spread no-wrap')
 
                         # Inputs are created empty here and populated once the log
                         # area exists, so load_selectors() can report its source.
@@ -1268,6 +1665,18 @@ class GUI:
                                     with ui.icon('help_outline').classes('text-grey cursor-pointer'):
                                         ui.tooltip(tooltip)
                                     self.am_selector_inputs[key] = inp
+
+                        self.bg_selector_inputs = {}
+                        self.dk_selector_inputs = {}
+                        for toggle_label, meta, inputs in [('Bing', BG_SELECTOR_META, self.bg_selector_inputs),
+                                                           ('DuckDuckGo', DK_SELECTOR_META, self.dk_selector_inputs)]:
+                            with ui.column().classes('w-full gap-1').bind_visibility_from(self.selector_toggle, 'value', value=toggle_label):
+                                for key, (label, tooltip) in meta.items():
+                                    with ui.row().classes('w-full items-center gap-1'):
+                                        inp = ui.input(label).classes('flex-grow').props('dense')
+                                        with ui.icon('help_outline').classes('text-grey cursor-pointer'):
+                                            ui.tooltip(tooltip)
+                                        inputs[key] = inp
 
             # LOGS AND ACTIONS
             with ui.column().classes('w-1/2 min-w-[400px] flex-grow'):
@@ -1295,13 +1704,20 @@ class GUI:
         with ui.row().classes('footer-text w-full p-2 justify-center'):
             ui.html('<a href="https://deep-culture.org" target="_blank">Deep Culture</a> · <a href="https://digitalmethods.net" target="_blank">Digital Methods Initiative</a>').classes('text-xs footer-text')
 
-        self.ao_defaults, self.am_defaults = GoogleAIScraper.load_selectors(log=self.log_push)
+        self.ao_defaults, self.am_defaults, self.bg_defaults, self.dk_defaults = GoogleAIScraper.load_selectors(log=self.log_push)
         for key, inp in self.ao_selector_inputs.items():
             if key in self.ao_defaults:
                 inp.value = self.ao_defaults[key]
         for key, inp in self.am_selector_inputs.items():
             if key in self.am_defaults:
                 inp.value = self.am_defaults[key]
+
+        for key, inp in self.bg_selector_inputs.items():
+            if key in self.bg_defaults:
+                inp.value = self.bg_defaults[key]
+        for key, inp in self.dk_selector_inputs.items():
+            if key in self.dk_defaults:
+                inp.value = self.dk_defaults[key]
 
         # Check for a newer release in the background and notify if one exists.
         if not DEBUG:
@@ -1321,6 +1737,16 @@ class GUI:
                 ui.button('Not now', on_click=dialog.close).props('flat')
                 ui.button('Download', on_click=lambda: webbrowser.open(url))
         dialog.open()
+
+    def update_engine_options(self, _=None):
+        """Grey out (and untick) Bing and DuckDuckGo when Google is set to AI Modes or both."""
+        available = (not self.google_cb.value) or self.mode.value == 'AI Overviews'
+        for checkbox in (self.scrape_bing_cb, self.scrape_duckduckgo_cb):
+            if available:
+                checkbox.enable()
+            else:
+                checkbox.set_value(False)
+                checkbox.disable()
 
     def update_progress(self, current, total):
         self.progress_label.set_text(f'Progress: {current}/{total}')
@@ -1366,7 +1792,7 @@ class GUI:
             df.to_csv(shuffled_filename, index=False)
             query_file = shuffled_filename
 
-        scrape_mode = self.mode.value.lower().replace(" ", "_")
+        scrape_mode = self.mode.value.lower().replace(" ", "_") if self.google_cb.value else "no_google"
         tld = self.tld.value.strip().lower()
         if not tld.startswith('.'):
             tld = '.' + tld
@@ -1385,6 +1811,10 @@ class GUI:
             throttled_strings=self.throttle_strings.value,
             ao_selectors={**self.ao_defaults, **{k: inp.value for k, inp in self.ao_selector_inputs.items()}},
             am_selectors={**self.am_defaults, **{k: inp.value for k, inp in self.am_selector_inputs.items()}},
+            bg_selectors={**self.bg_defaults, **{k: inp.value for k, inp in self.bg_selector_inputs.items()}},
+            dk_selectors={**self.dk_defaults, **{k: inp.value for k, inp in self.dk_selector_inputs.items()}},
+            scrape_bing=self.scrape_bing_cb.value,
+            scrape_duckduckgo=self.scrape_duckduckgo_cb.value,
             progress_callback=self.update_progress,
             log_callback=self.log_push
         )
